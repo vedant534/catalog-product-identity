@@ -1,0 +1,459 @@
+{
+  "corrected_resplit": {
+    "calibration": {
+      "pair_level": {
+        "brier_score": 0.010637162851659982,
+        "count": 9680,
+        "mean_score": 0.01915358034245143,
+        "observed_match_rate": 0.019524793388429752,
+        "positive_count": 189
+      },
+      "top_candidate": {
+        "brier_score": 0.1529949819422848,
+        "count": 484,
+        "mean_score": 0.24095429594167678,
+        "observed_match_rate": 0.34297520661157027,
+        "positive_count": 166
+      }
+    },
+    "common_rrf_pool_score_ranking_diagnostics": {
+      "definition": "Score-only reranking diagnostics over the shared fixed-budget RRF candidate set; these are not standalone channel retrieval results.",
+      "dense_score": {
+        "conditional_hit_at_1": 0.6595744680851063,
+        "gold_listing_count": 196,
+        "gold_retrieved_count": 188,
+        "hit_at_1_count": 124,
+        "mrr": 0.7375785823557037,
+        "overall_hit_at_1": 0.6326530612244898,
+        "reranking_miss_count": 64,
+        "retrieval_miss_count": 8
+      },
+      "lexical_score": {
+        "conditional_hit_at_1": 0.5957446808510638,
+        "gold_listing_count": 196,
+        "gold_retrieved_count": 188,
+        "hit_at_1_count": 112,
+        "mrr": 0.6898247090211376,
+        "overall_hit_at_1": 0.5714285714285714,
+        "reranking_miss_count": 76,
+        "retrieval_miss_count": 8
+      },
+      "rrf_score": {
+        "conditional_hit_at_1": 0.6648936170212766,
+        "gold_listing_count": 196,
+        "gold_retrieved_count": 188,
+        "hit_at_1_count": 125,
+        "mrr": 0.7511671335200746,
+        "overall_hit_at_1": 0.6377551020408163,
+        "reranking_miss_count": 63,
+        "retrieval_miss_count": 8
+      }
+    },
+    "exact_title_ambiguity_sensitivity": {
+      "definition": "Officially unmapped listings with an exact normalized-title Amazon collision are excluded, not relabelled.",
+      "excluded_listing_count": 6,
+      "listing_policy": {
+        "accuracy_on_automatic_decisions": 0.9770114942528736,
+        "assumed_no_match_listing_count": 282,
+        "assumed_no_match_review_count": 112,
+        "assumed_no_match_review_rate": 0.3971631205673759,
+        "auto_match": {
+          "correct_count": 0,
+          "empirical_precision": null,
+          "error_count": 0,
+          "group_evidence": {
+            "correct_count": 0,
+            "coverage": 0.0,
+            "empirical_precision": null,
+            "error_count": 0,
+            "precision_wilson_95_high": null,
+            "precision_wilson_95_low": null,
+            "support": 0
+          },
+          "listing_coverage": 0.0,
+          "listing_operation": {
+            "correct_count": 0,
+            "coverage": 0.0,
+            "empirical_precision": null,
+            "error_count": 0,
+            "precision_wilson_95_high": null,
+            "precision_wilson_95_low": null,
+            "support": 0
+          },
+          "support": 0,
+          "wilson_95_high": null,
+          "wilson_95_low": null
+        },
+        "auto_no_match": {
+          "correct_count": 170,
+          "empirical_precision": 0.9770114942528736,
+          "error_count": 4,
+          "group_evidence": {
+            "correct_count": 163,
+            "coverage": 0.36069114470842334,
+            "empirical_precision": 0.9760479041916168,
+            "error_count": 4,
+            "precision_wilson_95_high": 0.9906469777853889,
+            "precision_wilson_95_low": 0.9400404624739321,
+            "support": 167
+          },
+          "listing_coverage": 0.36401673640167365,
+          "listing_operation": {
+            "correct_count": 170,
+            "coverage": 0.36401673640167365,
+            "empirical_precision": 0.9770114942528736,
+            "error_count": 4,
+            "precision_wilson_95_high": 0.9910247490239869,
+            "precision_wilson_95_low": 0.9423908960161661,
+            "support": 174
+          },
+          "support": 174,
+          "wilson_95_high": 0.9910247490239869,
+          "wilson_95_low": 0.9423908960161661
+        },
+        "automatic_coverage": 0.36401673640167365,
+        "duplicate_group_count": 463,
+        "end_to_end_auto_match_rate": 0.0,
+        "listing_count": 478,
+        "manual_review": {
+          "correct_count": null,
+          "correctness_definition": "Undefined: manual review is an abstention, not an automatic decision.",
+          "empirical_precision": null,
+          "error_count": null,
+          "group_evidence": {
+            "correct_count": null,
+            "coverage": 0.6393088552915767,
+            "empirical_precision": null,
+            "error_count": null,
+            "precision_wilson_95_high": null,
+            "precision_wilson_95_low": null,
+            "support": 296
+          },
+          "listing_coverage": 0.6359832635983264,
+          "listing_operation": {
+            "correct_count": null,
+            "coverage": 0.6359832635983264,
+            "empirical_precision": null,
+            "error_count": null,
+            "precision_wilson_95_high": null,
+            "precision_wilson_95_low": null,
+            "support": 304
+          },
+          "support": 304,
+          "wilson_95_high": null,
+          "wilson_95_low": null
+        },
+        "manual_review_count": 304,
+        "manual_review_rate": 0.6359832635983264,
+        "matched_listing_count": 196,
+        "matched_review_count": 192,
+        "matched_review_rate": 0.9795918367346939
+      },
+      "no_match_detection": {
+        "assumption": "Official mapping absence is treated as no-match.",
+        "average_precision": 0.9376360845978589,
+        "count": 478,
+        "positive_count": 282,
+        "precision_at_policy": 0.9770114942528736,
+        "recall_at_policy": 0.6028368794326241
+      }
+    },
+    "listing_policy": {
+      "accuracy_on_automatic_decisions": 0.9770114942528736,
+      "assumed_no_match_listing_count": 288,
+      "assumed_no_match_review_count": 118,
+      "assumed_no_match_review_rate": 0.4097222222222222,
+      "auto_match": {
+        "correct_count": 0,
+        "empirical_precision": null,
+        "error_count": 0,
+        "group_evidence": {
+          "correct_count": 0,
+          "coverage": 0.0,
+          "empirical_precision": null,
+          "error_count": 0,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 0
+        },
+        "listing_coverage": 0.0,
+        "listing_operation": {
+          "correct_count": 0,
+          "coverage": 0.0,
+          "empirical_precision": null,
+          "error_count": 0,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 0
+        },
+        "support": 0,
+        "wilson_95_high": null,
+        "wilson_95_low": null
+      },
+      "auto_no_match": {
+        "correct_count": 170,
+        "empirical_precision": 0.9770114942528736,
+        "error_count": 4,
+        "group_evidence": {
+          "correct_count": 163,
+          "coverage": 0.35607675906183367,
+          "empirical_precision": 0.9760479041916168,
+          "error_count": 4,
+          "precision_wilson_95_high": 0.9906469777853889,
+          "precision_wilson_95_low": 0.9400404624739321,
+          "support": 167
+        },
+        "listing_coverage": 0.359504132231405,
+        "listing_operation": {
+          "correct_count": 170,
+          "coverage": 0.359504132231405,
+          "empirical_precision": 0.9770114942528736,
+          "error_count": 4,
+          "precision_wilson_95_high": 0.9910247490239869,
+          "precision_wilson_95_low": 0.9423908960161661,
+          "support": 174
+        },
+        "support": 174,
+        "wilson_95_high": 0.9910247490239869,
+        "wilson_95_low": 0.9423908960161661
+      },
+      "automatic_coverage": 0.359504132231405,
+      "duplicate_group_count": 469,
+      "end_to_end_auto_match_rate": 0.0,
+      "listing_count": 484,
+      "manual_review": {
+        "correct_count": null,
+        "correctness_definition": "Undefined: manual review is an abstention, not an automatic decision.",
+        "empirical_precision": null,
+        "error_count": null,
+        "group_evidence": {
+          "correct_count": null,
+          "coverage": 0.6439232409381663,
+          "empirical_precision": null,
+          "error_count": null,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 302
+        },
+        "listing_coverage": 0.640495867768595,
+        "listing_operation": {
+          "correct_count": null,
+          "coverage": 0.640495867768595,
+          "empirical_precision": null,
+          "error_count": null,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 310
+        },
+        "support": 310,
+        "wilson_95_high": null,
+        "wilson_95_low": null
+      },
+      "manual_review_count": 310,
+      "manual_review_rate": 0.640495867768595,
+      "matched_listing_count": 196,
+      "matched_review_count": 192,
+      "matched_review_rate": 0.9795918367346939
+    },
+    "no_match_detection": {
+      "assumption": "Official mapping absence is treated as no-match.",
+      "average_precision": 0.9316797070501374,
+      "count": 484,
+      "positive_count": 288,
+      "precision_at_policy": 0.9770114942528736,
+      "recall_at_policy": 0.5902777777777778
+    },
+    "pair_matching": {
+      "brier_score": 0.010637162851659982,
+      "classification_threshold": 0.5,
+      "count": 9680,
+      "f1": 0.5501618122977346,
+      "positive_count": 189,
+      "pr_auc": 0.6350259961649849,
+      "precision": 0.7083333333333334,
+      "recall": 0.4497354497354497,
+      "roc_auc": 0.9863803023638658
+    },
+    "retrieval": {
+      "amortized_batch_retrieval_ms_per_listing": 2.7920338325202465,
+      "candidate_budget": 20,
+      "dense_recall_at_10": 0.9285714285714286,
+      "dense_recall_at_20": 0.9540816326530612,
+      "dense_recall_at_5": 0.8724489795918368,
+      "latency_scope": "Query dense encoding plus exact lexical/dense retrieval and RRF; catalog precomputation and model loading excluded.",
+      "lexical_recall_at_10": 0.8979591836734694,
+      "lexical_recall_at_20": 0.9438775510204082,
+      "lexical_recall_at_5": 0.8367346938775511,
+      "listing_count": 484,
+      "mean_primary_candidate_count": 20.0,
+      "primary_retriever": "fixed_budget_rrf",
+      "retrieval_latency_seconds": 1.3513443749397993,
+      "rrf_constant": 60.0,
+      "rrf_recall_at_10": 0.9336734693877551,
+      "rrf_recall_at_20": 0.9591836734693877,
+      "rrf_recall_at_5": 0.9030612244897959,
+      "union_per_channel_definition": "Diagnostic only: lexical top-K union dense top-K, up to 2K rows.",
+      "union_per_channel_recall_at_10": 0.9489795918367347,
+      "union_per_channel_recall_at_20": 0.9795918367346939,
+      "union_per_channel_recall_at_5": 0.9081632653061225
+    },
+    "selected_matcher_ranking": {
+      "conditional_hit_at_1": 0.8829787234042553,
+      "gold_listing_count": 196,
+      "gold_retrieved_count": 188,
+      "hit_at_1_count": 166,
+      "mrr": 0.8975340136054422,
+      "overall_hit_at_1": 0.8469387755102041,
+      "reranking_miss_count": 22,
+      "retrieval_miss_count": 8
+    },
+    "status": "completed"
+  },
+  "development_checkpoint": {
+    "feature_columns": [
+      "lexical_similarity",
+      "dense_similarity",
+      "title_token_jaccard",
+      "title_fuzzy_similarity",
+      "manufacturer_exact",
+      "manufacturer_fuzzy_similarity",
+      "model_token_jaccard",
+      "numeric_token_conflict",
+      "relative_price_difference",
+      "query_manufacturer_missing",
+      "candidate_manufacturer_missing",
+      "query_description_missing",
+      "candidate_description_missing",
+      "query_price_missing",
+      "candidate_price_missing"
+    ],
+    "policy": {
+      "auto_match": {
+        "correct_count": 0,
+        "coverage": 0.0,
+        "empirical_precision": null,
+        "enabled": false,
+        "error_count": 0,
+        "feasible": false,
+        "group_evidence": {
+          "correct_count": 0,
+          "coverage": 0.0,
+          "empirical_precision": null,
+          "error_count": 0,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 0
+        },
+        "listing_operation": {
+          "correct_count": 0,
+          "coverage": 0.0,
+          "empirical_precision": null,
+          "error_count": 0,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 0
+        },
+        "precision_wilson_95_high": null,
+        "precision_wilson_95_low": null,
+        "support": 0,
+        "threshold": null
+      },
+      "auto_no_match": {
+        "correct_count": 193,
+        "coverage": 0.4258474576271186,
+        "empirical_precision": 0.9601990049751243,
+        "enabled": true,
+        "error_count": 8,
+        "feasible": true,
+        "group_evidence": {
+          "correct_count": 193,
+          "coverage": 0.4258474576271186,
+          "empirical_precision": 0.9601990049751243,
+          "error_count": 8,
+          "precision_wilson_95_high": 0.9796965756473863,
+          "precision_wilson_95_low": 0.92344090963062,
+          "support": 201
+        },
+        "listing_operation": {
+          "correct_count": 202,
+          "coverage": 0.43388429752066116,
+          "empirical_precision": 0.9619047619047619,
+          "error_count": 8,
+          "precision_wilson_95_high": 0.9805723555818997,
+          "precision_wilson_95_low": 0.9266418070500007,
+          "support": 210
+        },
+        "precision_wilson_95_high": 0.9796965756473863,
+        "precision_wilson_95_low": 0.92344090963062,
+        "support": 201,
+        "threshold": 0.02
+      },
+      "both_constraints_met": false,
+      "listing_count": 484,
+      "selection_evidence_unit": "unique_duplicate_group_id",
+      "selection_group_count": 472,
+      "selection_mode": "auto_no_match_only",
+      "warning": "Both automatic actions could not be enabled together while meeting their precision and support requirements. Only auto_no_match is enabled; all other listings require manual review."
+    },
+    "selected_model": "hybrid_logistic"
+  },
+  "evaluation_protocol": "predeclared_corrected_resplit",
+  "evidence_role": "transparent_secondary_confirmation",
+  "frozen_inputs": {
+    "catalog": {
+      "dense_shape": [
+        1363,
+        384
+      ],
+      "row_count": 1363,
+      "tfidf_shape": [
+        1363,
+        50000
+      ]
+    },
+    "raw_csv_sha256": {
+      "Amazon.csv": "cabc0379070c595eca65c4a69c77b3267b97f8a81b303e77115b52e6e534e65f",
+      "Amzon_GoogleProducts_perfectMapping.csv": "885eda7da34ed00809975d34452800e7fbde9ef0540fb60474a18dca15fa4fe7",
+      "GoogleProducts.csv": "18fbec453670e40e0969fdaffe71e92ba62a24c49b0c8341fe4621e70e402e3f"
+    },
+    "sentence_encoder": {
+      "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+      "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+    },
+    "split_assignments": {
+      "row_count": 3226,
+      "rows_by_split": {
+        "test": 484,
+        "train": 2258,
+        "validation": 484
+      },
+      "sha256": "4bc0394c757ba60ca728f9fd78de9844cbae6a2172397f6d09a0b12cd2fa13e1"
+    }
+  },
+  "run": {
+    "model_seed": 42,
+    "recall_ks": [
+      5,
+      10,
+      20
+    ],
+    "rrf_constant": 60.0,
+    "split_seed": 20260825,
+    "top_k": 20
+  },
+  "split": {
+    "assignment_label": "test",
+    "gold_pairs": 197,
+    "google_records": 484
+  },
+  "split_assignments": {
+    "row_count": 3226,
+    "rows_by_split": {
+      "test": 484,
+      "train": 2258,
+      "validation": 484
+    },
+    "sha256": "4bc0394c757ba60ca728f9fd78de9844cbae6a2172397f6d09a0b12cd2fa13e1"
+  },
+  "stage": "corrected-eval"
+}
