@@ -1,0 +1,107 @@
+{
+  "abstention": {
+    "accuracy_on_auto_decisions": 0.9681528662420382,
+    "auto_match_coverage": 0.006198347107438017,
+    "auto_match_precision": 0.6666666666666666,
+    "auto_reject_coverage": 0.3181818181818182,
+    "auto_reject_precision": 0.974025974025974,
+    "end_to_end_successful_match_rate": 0.010416666666666666,
+    "gold_retrieval_failure_count": 1,
+    "listing_count": 484,
+    "manual_review_rate": 0.6756198347107438,
+    "matched_listing_count": 192
+  },
+  "dataset": {
+    "amazon_records": 1363,
+    "gold_pairs": 1300,
+    "google_records": 3226,
+    "matched_google_records": 1291
+  },
+  "model": {
+    "class_weight": null,
+    "feature_columns": [
+      "lexical_similarity",
+      "dense_similarity",
+      "title_token_jaccard",
+      "title_fuzzy_similarity",
+      "manufacturer_exact",
+      "manufacturer_fuzzy_similarity",
+      "model_token_jaccard",
+      "numeric_token_conflict",
+      "relative_price_difference",
+      "query_manufacturer_missing",
+      "candidate_manufacturer_missing",
+      "query_description_missing",
+      "candidate_description_missing",
+      "query_price_missing",
+      "candidate_price_missing"
+    ],
+    "selected": "hybrid_logistic",
+    "sentence_encoder": "sentence-transformers/all-MiniLM-L6-v2",
+    "validation_constraints_met": true,
+    "validation_warning": null
+  },
+  "pair_matching": {
+    "brier_score": 0.007416486329646635,
+    "f1": 0.5316455696202531,
+    "pr_auc": 0.5426416439495428,
+    "precision": 0.6774193548387096,
+    "recall": 0.4375,
+    "roc_auc": 0.9876903261145686
+  },
+  "retrieval": {
+    "dense_recall_at_10": 0.9427083333333334,
+    "dense_recall_at_20": 0.9635416666666666,
+    "dense_recall_at_5": 0.875,
+    "latency_definition": "Warm per-listing query text transforms, dense encoding, and both exact searches; excludes model load and catalog precomputation.",
+    "lexical_recall_at_10": 0.9375,
+    "lexical_recall_at_20": 0.9739583333333334,
+    "lexical_recall_at_5": 0.8802083333333334,
+    "listing_count": 484,
+    "mean_candidate_count": 32.929752066115704,
+    "mean_latency_ms": 13.942721159359024,
+    "p95_latency_ms": 15.162512706592677,
+    "recall_at_10": 0.9739583333333334,
+    "recall_at_20": 0.9947916666666666,
+    "recall_at_5": 0.953125,
+    "retrieval_latency_seconds": 6.748277041129768,
+    "union_recall_at_10": 0.9739583333333334,
+    "union_recall_at_20": 0.9947916666666666,
+    "union_recall_at_5": 0.953125
+  },
+  "run": {
+    "recall_ks": [
+      5,
+      10,
+      20
+    ],
+    "seed": 42,
+    "split_ratios": [
+      0.7,
+      0.15,
+      0.15
+    ],
+    "top_k": 20
+  },
+  "splits": {
+    "test": {
+      "gold_pairs": 193,
+      "google_records": 484,
+      "matched_google_records": 192
+    },
+    "train": {
+      "gold_pairs": 912,
+      "google_records": 2258,
+      "matched_google_records": 904
+    },
+    "validation": {
+      "gold_pairs": 195,
+      "google_records": 484,
+      "matched_google_records": 195
+    }
+  },
+  "thresholds": {
+    "match_threshold": 0.97,
+    "reject_threshold": 0.01
+  }
+}
