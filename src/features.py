@@ -36,6 +36,8 @@ LEXICAL_FEATURE_COLUMNS = [
     "manufacturer_fuzzy_similarity",
 ]
 
+DENSE_FEATURE_COLUMNS = ["dense_similarity"]
+
 HYBRID_FEATURE_COLUMNS = [
     "lexical_similarity",
     "dense_similarity",
@@ -52,6 +54,17 @@ HYBRID_FEATURE_COLUMNS = [
     "candidate_description_missing",
     "query_price_missing",
     "candidate_price_missing",
+]
+
+RANK_FEATURE_COLUMNS = [
+    "retrieval_source_agreement",
+    "reciprocal_lexical_rank",
+    "reciprocal_dense_rank",
+]
+
+HYBRID_PLUS_RANK_FEATURE_COLUMNS = [
+    *HYBRID_FEATURE_COLUMNS,
+    *RANK_FEATURE_COLUMNS,
 ]
 
 FEATURE_COLUMNS = HYBRID_FEATURE_COLUMNS
@@ -206,6 +219,40 @@ def build_feature_frame(
     return pd.DataFrame(rows, columns=HYBRID_FEATURE_COLUMNS, index=query_records.index)
 
 
+def build_retrieval_rank_features(pairs: pd.DataFrame) -> pd.DataFrame:
+    """Create lightweight rank signals from a retrieval candidate table.
+
+    Missing or invalid channel ranks contribute zero. Source agreement is one
+    only when the candidate occurs in both the lexical and dense top-k lists.
+    """
+
+    def _ranks(column: str) -> np.ndarray:
+        if column not in pairs:
+            return np.full(len(pairs), np.nan, dtype=float)
+        return pd.to_numeric(pairs[column], errors="coerce").to_numpy(dtype=float)
+
+    lexical_ranks = _ranks("lexical_rank")
+    dense_ranks = _ranks("dense_rank")
+    lexical_present = np.isfinite(lexical_ranks) & (lexical_ranks > 0)
+    dense_present = np.isfinite(dense_ranks) & (dense_ranks > 0)
+    reciprocal_lexical = np.zeros(len(pairs), dtype=float)
+    reciprocal_dense = np.zeros(len(pairs), dtype=float)
+    reciprocal_lexical[lexical_present] = 1.0 / lexical_ranks[lexical_present]
+    reciprocal_dense[dense_present] = 1.0 / dense_ranks[dense_present]
+
+    return pd.DataFrame(
+        {
+            "retrieval_source_agreement": (lexical_present & dense_present).astype(
+                float
+            ),
+            "reciprocal_lexical_rank": reciprocal_lexical,
+            "reciprocal_dense_rank": reciprocal_dense,
+        },
+        index=pairs.index,
+        columns=RANK_FEATURE_COLUMNS,
+    )
+
+
 def build_pair_features(
     pairs: pd.DataFrame,
     google: pd.DataFrame,
@@ -262,7 +309,7 @@ def build_pair_features(
         dense_scores=dense_scores,
     )
     features.index = pairs.index
-    return features
+    return pd.concat([features, build_retrieval_rank_features(pairs)], axis=1)
 
 
 make_pair_features = build_pair_features

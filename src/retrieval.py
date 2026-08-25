@@ -12,6 +12,7 @@ from sklearn.preprocessing import normalize
 
 
 TEXT_FIELDS = ("title", "manufacturer", "description")
+DEFAULT_RRF_CONSTANT = 60.0
 CANDIDATE_COLUMNS = [
     "google_id",
     "amazon_id",
@@ -19,6 +20,8 @@ CANDIDATE_COLUMNS = [
     "dense_score",
     "lexical_rank",
     "dense_rank",
+    "rrf_score",
+    "rrf_rank",
     "retrieval_sources",
     "gold_injected",
 ]
@@ -145,7 +148,26 @@ def _rank_lookup(indices: np.ndarray) -> list[dict[int, int]]:
     ]
 
 
-def retrieve_candidates(
+def _candidate_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
+    candidates = pd.DataFrame(rows, columns=CANDIDATE_COLUMNS)
+    for column in ("lexical_rank", "dense_rank", "rrf_rank"):
+        candidates[column] = candidates[column].astype("Int64")
+    return candidates
+
+
+def _rrf_score(
+    lexical_rank: int | None,
+    dense_rank: int | None,
+    constant: float,
+) -> float:
+    return sum(
+        1.0 / (constant + rank)
+        for rank in (lexical_rank, dense_rank)
+        if rank is not None
+    )
+
+
+def retrieve_candidates_with_diagnostics(
     listings: pd.DataFrame,
     catalog: pd.DataFrame,
     vectorizer: TfidfVectorizer,
@@ -155,12 +177,21 @@ def retrieve_candidates(
     top_k: int = 10,
     gold_matches: pd.DataFrame | None = None,
     inject_gold: bool = False,
-) -> pd.DataFrame:
-    """Return the union of lexical and dense exact top-k candidates.
+    rrf_constant: float = DEFAULT_RRF_CONSTANT,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return fixed-budget RRF candidates and the raw per-channel union.
 
-    Gold candidates are optionally injected only for training. Injected rows are
-    explicitly marked so they cannot inflate retrieval-recall measurements.
+    The first frame contains exactly ``min(top_k, len(catalog))`` fused rows per
+    listing before optional gold injection. The second frame is the unforced raw
+    union of lexical top-k and dense top-k rows (up to ``2 * top_k``), intended
+    for per-channel and union-per-channel retrieval diagnostics.
+
+    Gold candidates are optionally injected into the first frame only. This is a
+    training-only caller choice: injected rows are explicitly marked, while the
+    diagnostic union always remains unforced.
     """
+    if not np.isfinite(rrf_constant) or rrf_constant < 0:
+        raise ValueError("rrf_constant must be a finite non-negative number")
     if len(listings) != len(query_embeddings):
         raise ValueError("query_embeddings must have one row per listing")
     if (
@@ -171,7 +202,8 @@ def retrieve_candidates(
     if inject_gold and gold_matches is None:
         raise ValueError("gold_matches are required when inject_gold=True")
     if listings.empty:
-        return pd.DataFrame(columns=CANDIDATE_COLUMNS)
+        empty = _candidate_frame([])
+        return empty.copy(), empty
 
     query_tfidf = vectorizer.transform(combine_text_fields(listings)).tocsr()
     lexical_scores = _cosine_scores(query_tfidf, catalog_tfidf)
@@ -185,37 +217,22 @@ def retrieve_candidates(
     catalog_positions = {product_id: index for index, product_id in enumerate(catalog_ids)}
     gold_by_google: dict[str, list[str]] = {}
     if gold_matches is not None:
+        gold = gold_matches[["google_id", "amazon_id"]].astype(str)
         gold_by_google = (
-            gold_matches.groupby("google_id", sort=False)["amazon_id"]
-            .agg(lambda values: list(dict.fromkeys(values.astype(str))))
+            gold.groupby("google_id", sort=False)["amazon_id"]
+            .agg(lambda values: list(dict.fromkeys(values)))
             .to_dict()
         )
 
-    rows: list[dict[str, object]] = []
+    fused_rows: list[dict[str, object]] = []
+    diagnostic_rows: list[dict[str, object]] = []
     for query_index, listing in enumerate(listings.itertuples(index=False)):
         google_id = str(getattr(listing, "product_id"))
         candidate_positions = set(map(int, lexical_indices[query_index]))
         candidate_positions.update(map(int, dense_indices[query_index]))
-        injected_positions: set[int] = set()
-        if inject_gold:
-            for amazon_id in gold_by_google.get(google_id, []):
-                position = catalog_positions.get(amazon_id)
-                if position is not None and position not in candidate_positions:
-                    candidate_positions.add(position)
-                    injected_positions.add(position)
 
-        def sort_key(position: int) -> tuple[float, int]:
-            ranks = [
-                rank
-                for rank in (
-                    lexical_ranks[query_index].get(position),
-                    dense_ranks[query_index].get(position),
-                )
-                if rank is not None
-            ]
-            return (min(ranks) if ranks else float("inf"), position)
-
-        for catalog_index in sorted(candidate_positions, key=sort_key):
+        listing_union: list[dict[str, object]] = []
+        for catalog_index in candidate_positions:
             lexical_rank = lexical_ranks[query_index].get(catalog_index)
             dense_rank = dense_ranks[query_index].get(catalog_index)
             sources = []
@@ -223,9 +240,7 @@ def retrieve_candidates(
                 sources.append("lexical")
             if dense_rank is not None:
                 sources.append("dense")
-            if catalog_index in injected_positions:
-                sources.append("gold_injected")
-            rows.append(
+            listing_union.append(
                 {
                     "google_id": google_id,
                     "amazon_id": catalog_ids[catalog_index],
@@ -233,12 +248,90 @@ def retrieve_candidates(
                     "dense_score": float(dense_scores[query_index, catalog_index]),
                     "lexical_rank": lexical_rank,
                     "dense_rank": dense_rank,
+                    "rrf_score": _rrf_score(
+                        lexical_rank, dense_rank, rrf_constant
+                    ),
+                    "rrf_rank": None,
                     "retrieval_sources": "+".join(sources),
-                    "gold_injected": catalog_index in injected_positions,
+                    "gold_injected": False,
                 }
             )
 
-    candidates = pd.DataFrame(rows, columns=CANDIDATE_COLUMNS)
-    candidates["lexical_rank"] = candidates["lexical_rank"].astype("Int64")
-    candidates["dense_rank"] = candidates["dense_rank"].astype("Int64")
+        listing_union.sort(
+            key=lambda row: (-float(row["rrf_score"]), str(row["amazon_id"]))
+        )
+        for rank, row in enumerate(listing_union, start=1):
+            row["rrf_rank"] = rank
+        diagnostic_rows.extend(listing_union)
+
+        fused = [dict(row) for row in listing_union[: min(top_k, len(catalog))]]
+        fused_ids = {str(row["amazon_id"]) for row in fused}
+        union_by_id = {str(row["amazon_id"]): row for row in listing_union}
+        if inject_gold:
+            for amazon_id in sorted(gold_by_google.get(google_id, [])):
+                if amazon_id in fused_ids:
+                    continue
+                position = catalog_positions.get(amazon_id)
+                if position is None:
+                    continue
+                if amazon_id in union_by_id:
+                    injected = dict(union_by_id[amazon_id])
+                else:
+                    injected = {
+                        "google_id": google_id,
+                        "amazon_id": amazon_id,
+                        "lexical_score": float(
+                            lexical_scores[query_index, position]
+                        ),
+                        "dense_score": float(dense_scores[query_index, position]),
+                        "lexical_rank": None,
+                        "dense_rank": None,
+                        "rrf_score": 0.0,
+                        "rrf_rank": None,
+                        "retrieval_sources": "",
+                        "gold_injected": False,
+                    }
+                injected["gold_injected"] = True
+                sources = str(injected["retrieval_sources"])
+                injected["retrieval_sources"] = "+".join(
+                    value for value in (sources, "gold_injected") if value
+                )
+                fused.append(injected)
+                fused_ids.add(amazon_id)
+        fused_rows.extend(fused)
+
+    return _candidate_frame(fused_rows), _candidate_frame(diagnostic_rows)
+
+
+def retrieve_candidates(
+    listings: pd.DataFrame,
+    catalog: pd.DataFrame,
+    vectorizer: TfidfVectorizer,
+    catalog_tfidf: sparse.spmatrix,
+    query_embeddings: np.ndarray,
+    catalog_embeddings: np.ndarray,
+    top_k: int = 10,
+    gold_matches: pd.DataFrame | None = None,
+    inject_gold: bool = False,
+    rrf_constant: float = DEFAULT_RRF_CONSTANT,
+) -> pd.DataFrame:
+    """Return fixed-budget reciprocal-rank-fused candidates.
+
+    Validation and test callers should leave ``inject_gold=False``. Training may
+    inject missing gold rows; every such row is marked by ``gold_injected=True``.
+    Use :func:`retrieve_candidates_with_diagnostics` when the raw top-k-per-
+    channel union is also needed for retrieval reporting.
+    """
+    candidates, _ = retrieve_candidates_with_diagnostics(
+        listings,
+        catalog,
+        vectorizer,
+        catalog_tfidf,
+        query_embeddings,
+        catalog_embeddings,
+        top_k=top_k,
+        gold_matches=gold_matches,
+        inject_gold=inject_gold,
+        rrf_constant=rrf_constant,
+    )
     return candidates

@@ -1,117 +1,210 @@
-"""Three-way abstention policy and validation threshold selection."""
+"""Three-way listing policy and evidence-aware threshold selection."""
 
 from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
+from math import sqrt
 from typing import Any
 
 import numpy as np
 
 
 AUTO_MATCH = "auto_match"
-AUTO_REJECT = "auto_reject"
+AUTO_NO_MATCH = "auto_no_match"
 MANUAL_REVIEW = "manual_review"
-VALID_ACTIONS = (AUTO_MATCH, AUTO_REJECT, MANUAL_REVIEW)
+VALID_ACTIONS = (AUTO_MATCH, AUTO_NO_MATCH, MANUAL_REVIEW)
+
+_WILSON_95_Z = 1.959963984540054
 
 
-def _validate_thresholds(match_threshold: float, reject_threshold: float) -> None:
-    if not 0.0 <= reject_threshold < match_threshold <= 1.0:
+def _normalized_threshold(value: float | None, name: str) -> float | None:
+    if value is None:
+        return None
+    threshold = float(value)
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError(f"{name} must be None or a finite value in [0, 1].")
+    return threshold
+
+
+def _validate_thresholds(
+    match_threshold: float | None,
+    no_match_threshold: float | None,
+) -> tuple[float | None, float | None]:
+    match = _normalized_threshold(match_threshold, "match_threshold")
+    no_match = _normalized_threshold(no_match_threshold, "no_match_threshold")
+    if match is not None and no_match is not None and no_match >= match:
         raise ValueError(
-            "Thresholds must satisfy 0 <= reject_threshold < "
-            "match_threshold <= 1."
+            "Enabled thresholds must satisfy no_match_threshold < match_threshold."
         )
+    return match, no_match
 
 
 def apply_policy(
-    probabilities: float | Sequence[float] | np.ndarray,
-    match_threshold: float,
-    reject_threshold: float,
+    scores: float | Sequence[float] | np.ndarray,
+    match_threshold: float | None,
+    no_match_threshold: float | None,
 ) -> str | np.ndarray:
-    """Map calibrated probabilities to auto-match, auto-reject, or review."""
-    _validate_thresholds(match_threshold, reject_threshold)
-    probability_array = np.asarray(probabilities, dtype=float)
-    if np.any(~np.isfinite(probability_array)):
-        raise ValueError("Probabilities must be finite.")
-    if np.any((probability_array < 0.0) | (probability_array > 1.0)):
-        raise ValueError("Probabilities must lie in [0, 1].")
+    """Apply enabled automatic actions and review everything else.
 
-    actions = np.full(probability_array.shape, MANUAL_REVIEW, dtype=object)
-    actions[probability_array >= match_threshold] = AUTO_MATCH
-    actions[probability_array <= reject_threshold] = AUTO_REJECT
-    if probability_array.ndim == 0:
+    Passing ``None`` for an action threshold disables that action. When both
+    automatic actions are enabled, their thresholds must leave a review region.
+    """
+
+    match, no_match = _validate_thresholds(match_threshold, no_match_threshold)
+    score_array = np.asarray(scores, dtype=float)
+    if np.any(~np.isfinite(score_array)):
+        raise ValueError("Scores must be finite.")
+    if np.any((score_array < 0.0) | (score_array > 1.0)):
+        raise ValueError("Scores must lie in [0, 1].")
+
+    actions = np.full(score_array.shape, MANUAL_REVIEW, dtype=object)
+    if match is not None:
+        actions[score_array >= match] = AUTO_MATCH
+    if no_match is not None:
+        actions[score_array <= no_match] = AUTO_NO_MATCH
+    if score_array.ndim == 0:
         return str(actions.item())
     return actions.astype(str)
 
 
-def _as_binary_labels(y_true: Sequence[int] | np.ndarray) -> np.ndarray:
+def _as_binary_labels(y_true: Sequence[int] | np.ndarray, name: str) -> np.ndarray:
     labels = np.asarray(y_true, dtype=int).reshape(-1)
     if not set(np.unique(labels)).issubset({0, 1}):
-        raise ValueError("y_true must contain only binary 0/1 labels.")
+        raise ValueError(f"{name} must contain only binary 0/1 labels.")
     return labels
 
 
-def _ratio(numerator: int, denominator: int) -> float | None:
-    return numerator / denominator if denominator else None
+def _validated_inputs(
+    y_true: Sequence[int] | np.ndarray,
+    scores: Sequence[float] | np.ndarray,
+    no_match_correct: Sequence[int] | np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    labels = _as_binary_labels(y_true, "y_true")
+    score_array = np.asarray(scores, dtype=float).reshape(-1)
+    if labels.size != score_array.size:
+        raise ValueError("Labels and scores must have equal lengths.")
+    if labels.size == 0:
+        raise ValueError("At least one validation example is required.")
+    if np.any(~np.isfinite(score_array)) or np.any(
+        (score_array < 0.0) | (score_array > 1.0)
+    ):
+        raise ValueError("Scores must be finite and lie in [0, 1].")
+
+    if no_match_correct is None:
+        no_match_labels = 1 - labels
+    else:
+        no_match_labels = _as_binary_labels(no_match_correct, "no_match_correct")
+        if no_match_labels.size != labels.size:
+            raise ValueError("no_match_correct must align with labels.")
+    return labels, score_array, no_match_labels
+
+
+def _count(value: int, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-negative integer.")
+    integer = int(value)
+    if integer != value or integer < 0:
+        raise ValueError(f"{name} must be a non-negative integer.")
+    return integer
+
+
+def wilson_interval(
+    correct: int,
+    support: int,
+) -> tuple[float | None, float | None]:
+    """Return a two-sided 95% Wilson interval for a binomial proportion."""
+
+    correct = _count(correct, "correct")
+    total = _count(support, "support")
+    if correct > total:
+        raise ValueError("correct_count cannot exceed support.")
+    if total == 0:
+        return None, None
+
+    proportion = correct / total
+    z_squared = _WILSON_95_Z**2
+    denominator = 1.0 + z_squared / total
+    center = (proportion + z_squared / (2.0 * total)) / denominator
+    half_width = (
+        _WILSON_95_Z
+        * sqrt(
+            proportion * (1.0 - proportion) / total
+            + z_squared / (4.0 * total**2)
+        )
+        / denominator
+    )
+    return max(0.0, center - half_width), min(1.0, center + half_width)
+
+
+def _action_statistics(
+    selected: np.ndarray,
+    correct_labels: np.ndarray,
+    total: int,
+) -> dict[str, float | int | None]:
+    support = int(selected.sum())
+    correct_count = int((correct_labels.astype(bool) & selected).sum())
+    error_count = support - correct_count
+    precision = correct_count / support if support else None
+    wilson_low, wilson_high = wilson_interval(correct_count, support)
+    return {
+        "support": support,
+        "correct_count": correct_count,
+        "error_count": error_count,
+        "empirical_precision": precision,
+        "precision_wilson_95_low": wilson_low,
+        "precision_wilson_95_high": wilson_high,
+        "coverage": support / total,
+    }
 
 
 def policy_metrics(
     y_true: Sequence[int] | np.ndarray,
-    probabilities: Sequence[float] | np.ndarray,
-    match_threshold: float,
-    reject_threshold: float,
-    reject_correct: Sequence[int] | np.ndarray | None = None,
+    scores: Sequence[float] | np.ndarray,
+    match_threshold: float | None,
+    no_match_threshold: float | None,
+    no_match_correct: Sequence[int] | np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Compute operational metrics for one decision row per listing.
+    """Compute operational metrics for one selected candidate per listing.
 
-    ``y_true`` says whether the selected candidate is a gold match. In the
-    open-world listing decision, rejecting a wrong candidate is not necessarily
-    correct: a different gold candidate may exist. Pass ``reject_correct`` as
-    true only for listings with no gold partner. Its default, ``1 - y_true``,
-    preserves ordinary binary-pair behavior for small tests and other callers.
+    ``y_true`` marks a correct top-candidate link. A low-scored wrong candidate
+    is not necessarily a correct no-match decision when the listing has another
+    gold partner, so callers can supply the listing-level ``no_match_correct``
+    labels. The default keeps ordinary binary examples convenient.
     """
-    labels = _as_binary_labels(y_true)
-    scores = np.asarray(probabilities, dtype=float).reshape(-1)
-    if labels.size != scores.size:
-        raise ValueError("Labels and probabilities must have equal lengths.")
-    if labels.size == 0:
-        raise ValueError("At least one validation example is required.")
-    if reject_correct is None:
-        reject_labels = 1 - labels
-    else:
-        reject_labels = _as_binary_labels(reject_correct)
-        if reject_labels.size != labels.size:
-            raise ValueError("reject_correct must align with labels.")
 
-    actions = np.asarray(
-        apply_policy(scores, match_threshold, reject_threshold), dtype=str
+    labels, score_array, no_match_labels = _validated_inputs(
+        y_true, scores, no_match_correct
     )
-    accepted = actions == AUTO_MATCH
-    rejected = actions == AUTO_REJECT
-    reviewed = actions == MANUAL_REVIEW
-    auto_decided = accepted | rejected
-
-    accepted_count = int(accepted.sum())
-    rejected_count = int(rejected.sum())
-    reviewed_count = int(reviewed.sum())
-    correct_accepts = int(((labels == 1) & accepted).sum())
-    correct_rejects = int(((reject_labels == 1) & rejected).sum())
-    total = int(labels.size)
-
+    match, no_match = _validate_thresholds(match_threshold, no_match_threshold)
+    actions = np.asarray(apply_policy(score_array, match, no_match), dtype=str)
+    auto_match_mask = actions == AUTO_MATCH
+    auto_no_match_mask = actions == AUTO_NO_MATCH
+    manual_review_mask = actions == MANUAL_REVIEW
+    auto_match = {
+        "enabled": match is not None,
+        "threshold": match,
+        **_action_statistics(auto_match_mask, labels, labels.size),
+    }
+    auto_no_match = {
+        "enabled": no_match is not None,
+        "threshold": no_match,
+        **_action_statistics(auto_no_match_mask, no_match_labels, labels.size),
+    }
+    automatic_support = auto_match["support"] + auto_no_match["support"]
+    automatic_correct = (
+        auto_match["correct_count"] + auto_no_match["correct_count"]
+    )
     return {
-        "auto_match_precision": _ratio(correct_accepts, accepted_count),
-        "auto_match_coverage": accepted_count / total,
-        "auto_reject_precision": _ratio(correct_rejects, rejected_count),
-        "auto_reject_coverage": rejected_count / total,
-        "manual_review_rate": reviewed_count / total,
-        "automatic_coverage": int(auto_decided.sum()) / total,
-        "accuracy_on_auto_decisions": _ratio(
-            correct_accepts + correct_rejects, int(auto_decided.sum())
+        AUTO_MATCH: auto_match,
+        AUTO_NO_MATCH: auto_no_match,
+        "automatic_coverage": automatic_support / labels.size,
+        "accuracy_on_auto_decisions": (
+            automatic_correct / automatic_support if automatic_support else None
         ),
-        "n_auto_match": accepted_count,
-        "n_auto_reject": rejected_count,
-        "n_manual_review": reviewed_count,
-        "n_total": total,
+        "manual_review_rate": float(manual_review_mask.mean()),
+        "n_manual_review": int(manual_review_mask.sum()),
+        "n_total": int(labels.size),
     }
 
 
@@ -120,142 +213,234 @@ def _threshold_grid(step: float) -> np.ndarray:
         raise ValueError("grid_step must lie in (0, 1].")
     count = int(np.floor(1.0 / step))
     values = np.arange(count + 1, dtype=float) * step
-    return np.unique(np.clip(np.append(values, 1.0), 0.0, 1.0))
+    # Keep decimal grid boundaries stable for the inclusive policy comparisons.
+    rounded = np.round(np.append(values, 1.0), decimals=12)
+    return np.unique(np.clip(rounded, 0.0, 1.0))
+
+
+def _validate_minimum_support(value: int, name: str) -> int:
+    minimum = _count(value, name)
+    if minimum == 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return minimum
+
+
+def _threshold_diagnostics(
+    scores: np.ndarray,
+    correct_labels: np.ndarray,
+    thresholds: np.ndarray,
+    *,
+    action: str,
+    precision_target: float,
+    min_support: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    total = scores.size
+    for threshold_value in thresholds:
+        threshold = float(threshold_value)
+        selected = (
+            scores <= threshold if action == AUTO_NO_MATCH else scores >= threshold
+        )
+        statistics = _action_statistics(selected, correct_labels, total)
+        precision = statistics["empirical_precision"]
+        support_met = statistics["support"] >= min_support
+        precision_target_met = (
+            precision is not None and precision >= precision_target
+        )
+        rows.append(
+            {
+                "action": action,
+                "threshold": threshold,
+                **statistics,
+                "precision_target": precision_target,
+                "min_support": min_support,
+                "support_met": support_met,
+                "precision_target_met": precision_target_met,
+                "feasible": support_met and precision_target_met,
+                "selected": False,
+            }
+        )
+    return rows
+
+
+def _compatible_pair_key(
+    pair: tuple[dict[str, Any], dict[str, Any]],
+) -> tuple[float, float, float]:
+    """Prefer coverage, then lower no-match and higher match boundaries."""
+    no_match, match = pair
+    return (
+        float(no_match["coverage"]) + float(match["coverage"]),
+        -float(no_match["threshold"]),
+        float(match["threshold"]),
+    )
+
+
+def _standalone_key(row: dict[str, Any]) -> tuple[float, float, int, float]:
+    """Apply the documented coverage, precision, action, numeric tie-breaks."""
+    action = str(row["action"])
+    threshold = float(row["threshold"])
+    action_priority = 1 if action == AUTO_NO_MATCH else 0
+    conservative_threshold = -threshold if action == AUTO_NO_MATCH else threshold
+    return (
+        float(row["coverage"]),
+        float(row["empirical_precision"]),
+        action_priority,
+        conservative_threshold,
+    )
+
+
+def _selected_action_result(
+    operational: dict[str, Any],
+    *,
+    feasible: bool,
+) -> dict[str, Any]:
+    return {
+        "feasible": feasible,
+        "enabled": bool(operational["enabled"]),
+        "threshold": operational["threshold"],
+        "support": int(operational["support"]),
+        "correct_count": int(operational["correct_count"]),
+        "error_count": int(operational["error_count"]),
+        "empirical_precision": operational["empirical_precision"],
+        "precision_wilson_95_low": operational["precision_wilson_95_low"],
+        "precision_wilson_95_high": operational["precision_wilson_95_high"],
+        "coverage": float(operational["coverage"]),
+    }
 
 
 def select_thresholds(
     y_true: Sequence[int] | np.ndarray,
-    probabilities: Sequence[float] | np.ndarray,
+    scores: Sequence[float] | np.ndarray,
     match_precision_target: float = 0.95,
-    reject_precision_target: float = 0.95,
+    no_match_precision_target: float = 0.95,
     grid_step: float = 0.01,
     *,
-    reject_correct: Sequence[int] | np.ndarray | None = None,
+    no_match_correct: Sequence[int] | np.ndarray | None = None,
+    min_auto_match_support: int = 20,
+    min_auto_no_match_support: int = 20,
     warn: bool = True,
 ) -> dict[str, Any]:
-    """Select thresholds that maximize coverage under precision constraints.
+    """Select only automatic actions with adequate precision and support.
 
-    Only threshold pairs producing at least one match and one reject are treated
-    as normally feasible. If no pair reaches both targets, the deterministic
-    fallback minimizes summed precision shortfall, then maximizes coverage and
-    achieved precision. The returned warning records that fallback explicitly.
+    Each action is screened independently. Compatible feasible actions are
+    combined for maximum automatic coverage; an action is never enabled by
+    relaxing its evidence requirements. If the feasible regions overlap, the
+    best feasible standalone action is enabled and the other remains review.
     """
+
     for name, target in (
         ("match_precision_target", match_precision_target),
-        ("reject_precision_target", reject_precision_target),
+        ("no_match_precision_target", no_match_precision_target),
     ):
         if not 0.0 <= target <= 1.0:
             raise ValueError(f"{name} must lie in [0, 1].")
-
-    labels = _as_binary_labels(y_true)
-    scores = np.asarray(probabilities, dtype=float).reshape(-1)
-    if labels.size != scores.size:
-        raise ValueError("Labels and probabilities must have equal lengths.")
-    if labels.size == 0:
-        raise ValueError("At least one validation example is required.")
-    if np.any(~np.isfinite(scores)) or np.any((scores < 0.0) | (scores > 1.0)):
-        raise ValueError("Probabilities must be finite and lie in [0, 1].")
-    if reject_correct is None:
-        reject_labels = 1 - labels
-    else:
-        reject_labels = _as_binary_labels(reject_correct)
-        if reject_labels.size != labels.size:
-            raise ValueError("reject_correct must align with labels.")
-
-    feasible: list[tuple[tuple[float, ...], dict[str, Any]]] = []
-    fallback: list[tuple[tuple[float, ...], dict[str, Any]]] = []
+    match_minimum = _validate_minimum_support(
+        min_auto_match_support, "min_auto_match_support"
+    )
+    no_match_minimum = _validate_minimum_support(
+        min_auto_no_match_support, "min_auto_no_match_support"
+    )
+    labels, score_array, no_match_labels = _validated_inputs(
+        y_true, scores, no_match_correct
+    )
     grid = _threshold_grid(grid_step)
 
-    for reject_threshold in grid[:-1]:
-        for match_threshold in grid[1:]:
-            if reject_threshold >= match_threshold:
-                continue
-            metrics = policy_metrics(
-                labels,
-                scores,
-                float(match_threshold),
-                float(reject_threshold),
-                reject_correct=reject_labels,
-            )
-            match_precision = metrics["auto_match_precision"]
-            reject_precision = metrics["auto_reject_precision"]
-            has_both_actions = (
-                metrics["n_auto_match"] > 0 and metrics["n_auto_reject"] > 0
-            )
-            match_value = 0.0 if match_precision is None else match_precision
-            reject_value = 0.0 if reject_precision is None else reject_precision
-            shortfall = max(0.0, match_precision_target - match_value) + max(
-                0.0, reject_precision_target - reject_value
-            )
-
-            result = {
-                "match_threshold": float(match_threshold),
-                "reject_threshold": float(reject_threshold),
-                **metrics,
-            }
-            conservative_width = float(match_threshold - reject_threshold)
-            if (
-                has_both_actions
-                and match_value >= match_precision_target
-                and reject_value >= reject_precision_target
-            ):
-                score = (
-                    float(metrics["automatic_coverage"]),
-                    min(match_value, reject_value),
-                    conservative_width,
-                )
-                feasible.append((score, result))
-
-            if has_both_actions:
-                fallback_score = (
-                    -shortfall,
-                    float(metrics["automatic_coverage"]),
-                    min(match_value, reject_value),
-                    conservative_width,
-                )
-                fallback.append((fallback_score, result))
-
-    if feasible:
-        _, selected = max(feasible, key=lambda item: item[0])
-        selected["constraints_met"] = True
-        selected["precision_shortfall"] = 0.0
-        selected["warning"] = None
-        return selected
-
-    if not fallback:
-        # A tiny validation set may make it impossible to emit both actions.
-        reject_threshold = float(grid[0])
-        match_threshold = float(grid[-1])
-        selected = {
-            "match_threshold": match_threshold,
-            "reject_threshold": reject_threshold,
-            **policy_metrics(
-                labels,
-                scores,
-                match_threshold,
-                reject_threshold,
-                reject_correct=reject_labels,
-            ),
-        }
-    else:
-        _, selected = max(fallback, key=lambda item: item[0])
-
-    match_value = selected["auto_match_precision"] or 0.0
-    reject_value = selected["auto_reject_precision"] or 0.0
-    selected["constraints_met"] = False
-    selected["precision_shortfall"] = max(
-        0.0, match_precision_target - match_value
-    ) + max(0.0, reject_precision_target - reject_value)
-    selected["warning"] = (
-        "Validation precision targets were not jointly achievable; using the "
-        "threshold pair with the smallest total precision shortfall. Achieved "
-        f"auto-match precision={match_value:.3f} and auto-reject "
-        f"precision={reject_value:.3f}."
+    no_match_rows = _threshold_diagnostics(
+        score_array,
+        no_match_labels,
+        grid,
+        action=AUTO_NO_MATCH,
+        precision_target=float(no_match_precision_target),
+        min_support=no_match_minimum,
     )
-    if warn:
-        warnings.warn(selected["warning"], RuntimeWarning, stacklevel=2)
-    return selected
+    match_rows = _threshold_diagnostics(
+        score_array,
+        labels,
+        grid,
+        action=AUTO_MATCH,
+        precision_target=float(match_precision_target),
+        min_support=match_minimum,
+    )
+    diagnostics = [*no_match_rows, *match_rows]
+    feasible_no_match = [row for row in no_match_rows if row["feasible"]]
+    feasible_match = [row for row in match_rows if row["feasible"]]
 
+    compatible_pairs = [
+        (no_match, match)
+        for no_match in feasible_no_match
+        for match in feasible_match
+        if no_match["threshold"] < match["threshold"]
+    ]
+    selected_rows: list[dict[str, Any]] = []
+    if compatible_pairs:
+        selected_rows.extend(max(compatible_pairs, key=_compatible_pair_key))
+        selection_mode = "both"
+    else:
+        standalone_candidates = [*feasible_no_match, *feasible_match]
+        if standalone_candidates:
+            selected = max(standalone_candidates, key=_standalone_key)
+            selected_rows.append(selected)
+            selection_mode = f"{selected['action']}_only"
+        else:
+            selection_mode = "manual_review_only"
 
-choose_thresholds = select_thresholds
-decide = apply_policy
+    for row in selected_rows:
+        row["selected"] = True
+    selected_by_action = {row["action"]: row for row in selected_rows}
+    match_threshold = (
+        float(selected_by_action[AUTO_MATCH]["threshold"])
+        if AUTO_MATCH in selected_by_action
+        else None
+    )
+    no_match_threshold = (
+        float(selected_by_action[AUTO_NO_MATCH]["threshold"])
+        if AUTO_NO_MATCH in selected_by_action
+        else None
+    )
+    operational = policy_metrics(
+        labels,
+        score_array,
+        match_threshold,
+        no_match_threshold,
+        no_match_correct=no_match_labels,
+    )
+    both_constraints_met = (
+        match_threshold is not None and no_match_threshold is not None
+    )
+
+    if both_constraints_met:
+        warning = None
+    elif selected_rows:
+        warning = (
+            "Both automatic actions could not be enabled together while meeting "
+            "their precision and support requirements. Only "
+            f"{selected_rows[0]['action']} is enabled; all other listings require "
+            "manual review."
+        )
+    else:
+        warning = (
+            "No automatic action met its precision and support requirements; all "
+            "listings require manual review."
+        )
+    if warning is not None and warn:
+        warnings.warn(warning, RuntimeWarning, stacklevel=2)
+
+    return {
+        "match_threshold": match_threshold,
+        "no_match_threshold": no_match_threshold,
+        AUTO_MATCH: _selected_action_result(
+            operational[AUTO_MATCH], feasible=bool(feasible_match)
+        ),
+        AUTO_NO_MATCH: _selected_action_result(
+            operational[AUTO_NO_MATCH], feasible=bool(feasible_no_match)
+        ),
+        "both_constraints_met": both_constraints_met,
+        "selection_mode": selection_mode,
+        "automatic_coverage": operational["automatic_coverage"],
+        "accuracy_on_auto_decisions": operational["accuracy_on_auto_decisions"],
+        "manual_review_rate": operational["manual_review_rate"],
+        "n_manual_review": operational["n_manual_review"],
+        "n_total": operational["n_total"],
+        "warning": warning,
+        "threshold_diagnostics": diagnostics,
+    }

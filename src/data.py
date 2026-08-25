@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 import shutil
@@ -31,6 +33,8 @@ PRODUCT_COLUMNS = [
     "source",
 ]
 SPLIT_NAMES = ("train", "validation", "test")
+DUPLICATE_TEXT_COLUMNS = ("title", "manufacturer", "description")
+MISSING_PRICE_SIGNATURE = "<missing-price>"
 
 
 def _normalized_name(value: object) -> str:
@@ -251,6 +255,45 @@ def _target_counts(total: int, ratios: tuple[float, float, float]) -> np.ndarray
     return targets
 
 
+def _duplicate_signature_frame(google: pd.DataFrame) -> pd.DataFrame:
+    """Build exact, normalized signatures for the first row of each Google ID."""
+    normalized_text = {
+        column: _clean_text(google[column]).str.lower()
+        for column in DUPLICATE_TEXT_COLUMNS
+    }
+    parsed_prices = _clean_prices(google["price"])
+    price_signatures = parsed_prices.map(
+        lambda value: (
+            MISSING_PRICE_SIGNATURE
+            if pd.isna(value)
+            else float(value).hex()
+        )
+    )
+    signatures = pd.DataFrame(
+        {
+            "google_id": _clean_ids(google["product_id"]),
+            **normalized_text,
+            "price_signature": price_signatures,
+        }
+    ).drop_duplicates("google_id", keep="first")
+    signatures["duplicate_signature"] = list(
+        zip(
+            signatures["title"],
+            signatures["manufacturer"],
+            signatures["description"],
+            signatures["price_signature"],
+        )
+    )
+    return signatures[["google_id", "duplicate_signature"]]
+
+
+def _stable_duplicate_group_id(signature: tuple[str, str, str, str]) -> str:
+    """Return an order-independent identifier derived only from the signature."""
+    payload = json.dumps(signature, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"duplicate_{digest[:16]}"
+
+
 def make_entity_splits(
     google: pd.DataFrame,
     gold: pd.DataFrame,
@@ -259,8 +302,9 @@ def make_entity_splits(
 ) -> pd.DataFrame:
     """Assign every Google listing to a deterministic connected-component split.
 
-    Amazon remains a fixed catalog. Gold-linked Google records sharing any Amazon
-    record stay together; unmatched Google listings are singleton components.
+    Amazon remains a fixed catalog. Exact duplicate Google rows and gold-linked
+    Google records sharing any Amazon record stay together. Unmapped members of a
+    mixed mapped/unmapped duplicate group are flagged as label-ambiguous.
     """
     if len(ratios) != len(SPLIT_NAMES) or any(value < 0 for value in ratios):
         raise ValueError("ratios must contain three non-negative values")
@@ -273,11 +317,45 @@ def make_entity_splits(
     for google_id in google_ids:
         links.add(f"g:{google_id}")
 
+    signature_groups: defaultdict[tuple[str, str, str, str], list[str]] = (
+        defaultdict(list)
+    )
+    signature_frame = _duplicate_signature_frame(google)
+    for row in signature_frame.itertuples(index=False):
+        if row.google_id in google_id_set:
+            signature_groups[row.duplicate_signature].append(row.google_id)
+
+    # Exact duplicate edges are added before gold edges so records with missing
+    # mappings cannot be separated from otherwise identical mapped records.
+    for duplicate_ids in signature_groups.values():
+        ordered_ids = sorted(duplicate_ids)
+        for duplicate_id in ordered_ids[1:]:
+            links.union(f"g:{ordered_ids[0]}", f"g:{duplicate_id}")
+
+    mapped_google_ids: set[str] = set()
     for pair in gold[["google_id", "amazon_id"]].itertuples(index=False):
         google_id = str(pair.google_id).strip()
         amazon_id = str(pair.amazon_id).strip()
         if google_id in google_id_set and amazon_id:
+            mapped_google_ids.add(google_id)
             links.union(f"g:{google_id}", f"a:{amazon_id}")
+
+    duplicate_metadata: dict[str, tuple[str, int, bool]] = {}
+    for signature, duplicate_ids in signature_groups.items():
+        ordered_ids = sorted(duplicate_ids)
+        group_id = _stable_duplicate_group_id(signature)
+        group_size = len(ordered_ids)
+        has_mapped = any(item in mapped_google_ids for item in ordered_ids)
+        has_unmapped = any(item not in mapped_google_ids for item in ordered_ids)
+        for google_id in ordered_ids:
+            ambiguous_label = (
+                has_mapped and has_unmapped and google_id not in mapped_google_ids
+            )
+            duplicate_metadata[google_id] = (
+                group_id,
+                group_size,
+                ambiguous_label,
+            )
 
     grouped: defaultdict[str, list[str]] = defaultdict(list)
     for google_id in google_ids:
@@ -309,10 +387,23 @@ def make_entity_splits(
             "google_id": google_id,
             "component_id": assignments[google_id][0],
             "split": assignments[google_id][1],
+            "duplicate_group_id": duplicate_metadata[google_id][0],
+            "duplicate_group_size": duplicate_metadata[google_id][1],
+            "ambiguous_label": duplicate_metadata[google_id][2],
         }
         for google_id in google_ids
     ]
-    return pd.DataFrame(rows, columns=["google_id", "component_id", "split"])
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "google_id",
+            "component_id",
+            "split",
+            "duplicate_group_id",
+            "duplicate_group_size",
+            "ambiguous_label",
+        ],
+    )
 
 
 def split_google_listings(

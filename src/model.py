@@ -12,8 +12,12 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 
-from src.features import HYBRID_FEATURE_COLUMNS, LEXICAL_FEATURE_COLUMNS
-from src.policy import select_thresholds
+from src.features import (
+    DENSE_FEATURE_COLUMNS,
+    HYBRID_FEATURE_COLUMNS,
+    HYBRID_PLUS_RANK_FEATURE_COLUMNS,
+    LEXICAL_FEATURE_COLUMNS,
+)
 
 
 def _feature_matrix(
@@ -142,11 +146,13 @@ def fit_model_variants(
     max_iter: int = 1_000,
     regularization_c: float = 1.0,
 ) -> dict[str, dict[str, Any]]:
-    """Fit the two allowed learned variants: lexical and final hybrid."""
+    """Fit the four predeclared lightweight logistic variants."""
     variants: dict[str, dict[str, Any]] = {}
     for name, columns in (
         ("lexical_logistic", LEXICAL_FEATURE_COLUMNS),
+        ("dense_logistic", DENSE_FEATURE_COLUMNS),
         ("hybrid_logistic", HYBRID_FEATURE_COLUMNS),
+        ("hybrid_rank_logistic", HYBRID_PLUS_RANK_FEATURE_COLUMNS),
     ):
         estimator = fit_calibrated_logistic(
             train_features,
@@ -167,56 +173,29 @@ def fit_model_variants(
     return variants
 
 
-def fit_balanced_variant(
-    train_features: pd.DataFrame,
-    y_train: Sequence[int] | np.ndarray,
-    query_groups: Sequence[Any] | np.ndarray,
-    feature_columns: Sequence[str],
-    *,
-    seed: int = 42,
-    cv_folds: int = 3,
-    max_iter: int = 1_000,
-    regularization_c: float = 1.0,
-) -> dict[str, Any]:
-    """Fit one balanced alternative after validation shows it is warranted."""
-    estimator = fit_calibrated_logistic(
-        train_features,
-        y_train,
-        query_groups,
-        feature_columns,
-        class_weight="balanced",
-        seed=seed,
-        cv_folds=cv_folds,
-        max_iter=max_iter,
-        regularization_c=regularization_c,
-    )
-    return {
-        "estimator": estimator,
-        "feature_columns": list(feature_columns),
-        "class_weight": "balanced",
-    }
-
-
 def top_candidate_indices(
     probabilities: Sequence[float] | np.ndarray,
     query_ids: Sequence[Any] | np.ndarray,
+    candidate_ids: Sequence[Any] | np.ndarray,
 ) -> np.ndarray:
-    """Return stable input positions for each query's highest-scoring pair."""
+    """Return top-pair positions using score descending, then candidate ID."""
     scores = np.asarray(probabilities, dtype=float).reshape(-1)
     groups = np.asarray(query_ids).reshape(-1)
-    if scores.size != groups.size:
-        raise ValueError("Probabilities and query IDs must align.")
+    candidates = np.asarray(candidate_ids).astype(str).reshape(-1)
+    if not (scores.size == groups.size == candidates.size):
+        raise ValueError("Probabilities, query IDs, and candidate IDs must align.")
     frame = pd.DataFrame(
         {
             "query_id": groups,
+            "candidate_id": candidates,
             "probability": scores,
             "input_order": np.arange(scores.size),
         }
     )
     top = (
         frame.sort_values(
-            ["query_id", "probability", "input_order"],
-            ascending=[True, False, True],
+            ["query_id", "probability", "candidate_id", "input_order"],
+            ascending=[True, False, True, True],
             kind="mergesort",
         )
         .drop_duplicates("query_id", keep="first")
@@ -229,153 +208,166 @@ def top_candidate_rows(
     probabilities: Sequence[float] | np.ndarray,
     y_true: Sequence[int] | np.ndarray,
     query_ids: Sequence[Any] | np.ndarray,
+    candidate_ids: Sequence[Any] | np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Select one highest-probability pair per query, stably on input order."""
+    """Select one highest-probability pair per query with the shared tie-break."""
     scores = np.asarray(probabilities, dtype=float).reshape(-1)
     labels = np.asarray(y_true, dtype=int).reshape(-1)
     groups = np.asarray(query_ids).reshape(-1)
     if not (scores.size == labels.size == groups.size):
         raise ValueError("Probabilities, labels, and query IDs must align.")
 
-    indices = top_candidate_indices(scores, groups)
+    indices = top_candidate_indices(scores, groups, candidate_ids)
     return labels[indices], scores[indices]
 
 
-def _top_reject_correct(
-    top_indices: np.ndarray,
-    query_ids: np.ndarray,
-    *,
-    listing_has_gold: Sequence[int] | np.ndarray | Mapping[Any, bool] | None,
-    reject_correct: Sequence[int] | np.ndarray | Mapping[Any, bool] | None,
-) -> np.ndarray | None:
-    if listing_has_gold is not None and reject_correct is not None:
-        raise ValueError(
-            "Pass validation_listing_has_gold or validation_reject_correct, not both."
-        )
-    supplied = reject_correct if reject_correct is not None else listing_has_gold
-    if supplied is None:
-        return None
+def select_top_candidates(candidate_predictions: pd.DataFrame) -> pd.DataFrame:
+    """Return exactly one deterministic top-scoring row per represented listing."""
+    required = {"google_id", "amazon_id", "probability"}
+    missing = required - set(candidate_predictions.columns)
+    if missing:
+        raise ValueError(f"candidate_predictions missing columns: {sorted(missing)}")
+    frame = candidate_predictions.copy()
+    frame[["google_id", "amazon_id"]] = frame[["google_id", "amazon_id"]].astype(str)
+    frame["probability"] = pd.to_numeric(frame["probability"], errors="raise")
+    frame = frame.sort_values(
+        ["google_id", "probability", "amazon_id"],
+        ascending=[True, False, True],
+        kind="mergesort",
+    )
+    return frame.drop_duplicates("google_id", keep="first").reset_index(drop=True)
 
-    if isinstance(supplied, Mapping):
-        try:
-            values = np.asarray(
-                [bool(supplied[query_id]) for query_id in query_ids[top_indices]],
-                dtype=int,
-            )
-        except KeyError as error:
-            raise KeyError(f"Missing listing policy label for query {error.args[0]!r}.")
-    else:
-        aligned = np.asarray(supplied, dtype=int).reshape(-1)
-        if aligned.size != query_ids.size:
-            raise ValueError(
-                "Listing policy labels must align with validation candidate rows."
-            )
-        values = aligned[top_indices]
 
-    if not set(np.unique(values)).issubset({0, 1}):
-        raise ValueError("Listing policy labels must contain only 0/1 values.")
-    return 1 - values if listing_has_gold is not None else values
+def compute_ranking_metrics(
+    candidate_predictions: pd.DataFrame,
+    gold_pairs: pd.DataFrame,
+    all_listing_ids: Sequence[Any] | np.ndarray,
+) -> dict[str, float | int]:
+    """Compute listing ranking metrics with gold-bearing listings as denominator."""
+    required = {"google_id", "amazon_id", "probability"}
+    if not required.issubset(candidate_predictions.columns):
+        raise ValueError(f"candidate_predictions must contain {sorted(required)}")
+    if not {"google_id", "amazon_id"}.issubset(gold_pairs.columns):
+        raise ValueError("gold_pairs must contain google_id and amazon_id")
+
+    listing_ids = {str(value) for value in all_listing_ids}
+    frame = candidate_predictions.copy()
+    frame[["google_id", "amazon_id"]] = frame[["google_id", "amazon_id"]].astype(str)
+    frame = frame.loc[frame["google_id"].isin(listing_ids)].copy()
+    frame["probability"] = pd.to_numeric(frame["probability"], errors="raise")
+    frame = frame.sort_values(
+        ["google_id", "probability", "amazon_id"],
+        ascending=[True, False, True],
+        kind="mergesort",
+    )
+    frame["model_rank"] = frame.groupby("google_id", sort=False).cumcount() + 1
+
+    gold = gold_pairs[["google_id", "amazon_id"]].astype(str).drop_duplicates()
+    gold = gold.loc[gold["google_id"].isin(listing_ids)]
+    gold_set = set(gold.itertuples(index=False, name=None))
+    gold_listing_ids = set(gold["google_id"])
+    frame["is_gold_pair"] = [
+        pair in gold_set
+        for pair in frame[["google_id", "amazon_id"]].itertuples(index=False, name=None)
+    ]
+
+    top = frame.drop_duplicates("google_id", keep="first")
+    hit_count = int(top["is_gold_pair"].sum())
+    best_gold_rank = frame.loc[frame["is_gold_pair"]].groupby("google_id")[
+        "model_rank"
+    ].min()
+    retrieved_count = int(best_gold_rank.size)
+    gold_count = len(gold_listing_ids)
+    reciprocal_rank_sum = float((1.0 / best_gold_rank).sum())
+
+    return {
+        "gold_listing_count": gold_count,
+        "gold_retrieved_count": retrieved_count,
+        "hit_at_1_count": hit_count,
+        "overall_hit_at_1": float(hit_count / gold_count) if gold_count else 0.0,
+        "conditional_hit_at_1": (
+            float(hit_count / retrieved_count) if retrieved_count else 0.0
+        ),
+        "mrr": float(reciprocal_rank_sum / gold_count) if gold_count else 0.0,
+        "retrieval_miss_count": gold_count - retrieved_count,
+        "reranking_miss_count": retrieved_count - hit_count,
+    }
 
 
 def select_model(
     candidates: Mapping[str, Mapping[str, Any]],
     validation_features: pd.DataFrame,
-    y_validation: Sequence[int] | np.ndarray,
-    validation_query_ids: Sequence[Any] | np.ndarray,
-    *,
-    validation_listing_has_gold: (
-        Sequence[int] | np.ndarray | Mapping[Any, bool] | None
-    ) = None,
-    validation_reject_correct: (
-        Sequence[int] | np.ndarray | Mapping[Any, bool] | None
-    ) = None,
-    match_precision_target: float = 0.95,
-    reject_precision_target: float = 0.95,
-    threshold_grid_step: float = 0.01,
+    validation_candidates: pd.DataFrame,
+    validation_gold: pd.DataFrame,
+    all_validation_listing_ids: Sequence[Any] | np.ndarray,
 ) -> tuple[str, dict[str, Any], pd.DataFrame]:
-    """Select a deployable variant using validation ranking and policy metrics.
-
-    Models satisfying both precision targets rank ahead of infeasible models;
-    within that set validation pair PR-AUC is primary, followed by automatic
-    coverage and then fewer features. If no model is feasible, the same ranking
-    selects the highest-PR-AUC model with its documented fallback thresholds.
-    """
-    labels = np.asarray(y_validation, dtype=int).reshape(-1)
-    query_ids = np.asarray(validation_query_ids).reshape(-1)
-    if labels.size != query_ids.size:
-        raise ValueError("Validation labels and query IDs must align.")
+    """Select by validation Hit@1, MRR, fewer features, then declared order."""
     if not candidates:
         raise ValueError("At least one model candidate is required.")
-    if set(np.unique(labels)) != {0, 1}:
-        raise ValueError("Validation labels must contain both classes.")
+    if len(validation_features) != len(validation_candidates):
+        raise ValueError("Validation features and candidates must align.")
+
+    gold_set = set(
+        validation_gold[["google_id", "amazon_id"]]
+        .astype(str)
+        .itertuples(index=False, name=None)
+    )
+    labels = np.asarray(
+        [
+            pair in gold_set
+            for pair in validation_candidates[["google_id", "amazon_id"]]
+            .astype(str)
+            .itertuples(index=False, name=None)
+        ],
+        dtype=int,
+    )
 
     diagnostics: list[dict[str, Any]] = []
     enriched: dict[str, dict[str, Any]] = {}
+    declared_order = {name: index for index, name in enumerate(candidates)}
     for name, candidate in candidates.items():
         probabilities = predict_probabilities(candidate, validation_features)
-        top_indices = top_candidate_indices(probabilities, query_ids)
-        top_labels = labels[top_indices]
-        top_probabilities = probabilities[top_indices]
-        reject_correct = _top_reject_correct(
-            top_indices,
-            query_ids,
-            listing_has_gold=validation_listing_has_gold,
-            reject_correct=validation_reject_correct,
-        )
-        thresholds = select_thresholds(
-            top_labels,
-            top_probabilities,
-            match_precision_target=match_precision_target,
-            reject_precision_target=reject_precision_target,
-            grid_step=threshold_grid_step,
-            reject_correct=reject_correct,
-            warn=False,
+        predictions = validation_candidates[["google_id", "amazon_id"]].copy()
+        predictions["probability"] = probabilities
+        ranking = compute_ranking_metrics(
+            predictions,
+            validation_gold,
+            all_validation_listing_ids,
         )
         pr_auc = float(average_precision_score(labels, probabilities))
-        roc_auc = float(roc_auc_score(labels, probabilities))
+        roc_auc = (
+            float(roc_auc_score(labels, probabilities))
+            if np.unique(labels).size == 2
+            else 0.0
+        )
         bundle = dict(candidate)
-        bundle["thresholds"] = {
-            "match_threshold": thresholds["match_threshold"],
-            "reject_threshold": thresholds["reject_threshold"],
-        }
         enriched[name] = bundle
         diagnostics.append(
             {
                 "model": name,
+                "validation_overall_hit_at_1": ranking["overall_hit_at_1"],
+                "validation_conditional_hit_at_1": ranking["conditional_hit_at_1"],
+                "validation_mrr": ranking["mrr"],
                 "validation_pr_auc": pr_auc,
                 "validation_roc_auc": roc_auc,
-                "constraints_met": bool(thresholds["constraints_met"]),
-                "automatic_coverage": thresholds["automatic_coverage"],
-                "auto_match_precision": thresholds["auto_match_precision"],
-                "auto_reject_precision": thresholds["auto_reject_precision"],
-                "match_threshold": thresholds["match_threshold"],
-                "reject_threshold": thresholds["reject_threshold"],
-                "precision_shortfall": thresholds["precision_shortfall"],
                 "class_weight": str(candidate.get("class_weight")),
                 "feature_count": len(candidate["feature_columns"]),
-                "warning": thresholds["warning"],
+                "declared_order": declared_order[name],
             }
         )
 
     comparison = pd.DataFrame(diagnostics)
-    feasible_exists = bool(comparison["constraints_met"].any())
-    pool = comparison[comparison["constraints_met"]] if feasible_exists else comparison
-    ordered = pool.sort_values(
-        ["validation_pr_auc", "automatic_coverage", "feature_count", "model"],
+    ordered = comparison.sort_values(
+        [
+            "validation_overall_hit_at_1",
+            "validation_mrr",
+            "feature_count",
+            "declared_order",
+        ],
         ascending=[False, False, True, True],
         kind="mergesort",
     )
     selected_name = str(ordered.iloc[0]["model"])
     comparison["selected"] = comparison["model"] == selected_name
-    comparison = comparison.sort_values("model", kind="mergesort").reset_index(drop=True)
+    comparison = comparison.drop(columns="declared_order").reset_index(drop=True)
     return selected_name, enriched[selected_name], comparison
-
-
-def should_try_balanced(model_comparison: pd.DataFrame) -> bool:
-    """Return true only when no unweighted validation candidate meets policy."""
-    if "constraints_met" not in model_comparison:
-        raise KeyError("model_comparison needs a constraints_met column.")
-    return not bool(model_comparison["constraints_met"].any())
-
-
-train_matcher = fit_calibrated_logistic

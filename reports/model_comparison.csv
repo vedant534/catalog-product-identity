@@ -1,4 +1,5 @@
-model,validation_pr_auc,validation_roc_auc,constraints_met,automatic_coverage,auto_match_precision,auto_reject_precision,match_threshold,reject_threshold,precision_shortfall,class_weight,feature_count,warning,selected
-lexical_similarity_baseline,0.3160746806377289,0.9286528737801474,False,0.1921487603305785,0.8571428571428571,0.9651162790697675,0.8300000000000001,0.21,0.09285714285714286,not_applicable,1,Validation precision targets were not jointly achievable; using the threshold pair with the smallest total precision shortfall. Achieved auto-match precision=0.857 and auto-reject precision=0.965.,False
-hybrid_logistic,0.5595180101896946,0.9888339086922446,True,0.32644628099173556,1.0,0.9681528662420382,0.97,0.01,0.0,None,15,,True
-lexical_logistic,0.4712626087331313,0.982602928956936,False,0.47107438016528924,0.6533333333333333,0.9607843137254902,0.58,0.01,0.29666666666666663,None,5,Validation precision targets were not jointly achievable; using the threshold pair with the smallest total precision shortfall. Achieved auto-match precision=0.653 and auto-reject precision=0.961.,False
+model,validation_overall_hit_at_1,validation_conditional_hit_at_1,validation_mrr,validation_pr_auc,validation_roc_auc,class_weight,feature_count,selected
+lexical_logistic,0.8526315789473684,0.8571428571428571,0.9061904761904762,0.5434100209131086,0.9807029246871136,None,5,False
+dense_logistic,0.6736842105263158,0.6772486772486772,0.790176309758353,0.3973914407763941,0.9511876248000578,None,1,False
+hybrid_logistic,0.868421052631579,0.873015873015873,0.9254385964912282,0.6441419341771109,0.9855721615383809,None,15,True
+hybrid_rank_logistic,0.8473684210526315,0.8518518518518519,0.9162280701754386,0.721951256440005,0.989731289853945,None,18,False

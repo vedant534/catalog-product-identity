@@ -1,8 +1,9 @@
-"""Evaluation and report helpers for the catalog identity pipeline."""
+"""Evaluation and compact report helpers for catalog identity matching."""
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -19,97 +20,88 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from src.model import select_top_candidates
+from src.policy import AUTO_MATCH, AUTO_NO_MATCH, MANUAL_REVIEW, apply_policy, wilson_interval
 
-VALID_ACTIONS = {"auto_match", "auto_reject", "manual_review"}
+
+def _rate(numerator: int, denominator: int) -> float:
+    return float(numerator / denominator) if denominator else 0.0
+
+
+def _listing_recall(
+    candidates: pd.DataFrame,
+    mask: pd.Series | np.ndarray,
+    gold_by_listing: Mapping[str, set[str]],
+) -> float:
+    retrieved = (
+        candidates.loc[mask, ["google_id", "amazon_id"]]
+        .groupby("google_id")["amazon_id"]
+        .agg(set)
+        .to_dict()
+    )
+    hits = sum(
+        bool(gold_ids & retrieved.get(google_id, set()))
+        for google_id, gold_ids in gold_by_listing.items()
+    )
+    return _rate(hits, len(gold_by_listing))
 
 
 def compute_retrieval_metrics(
     candidates: pd.DataFrame,
+    diagnostic_pool: pd.DataFrame,
     gold_pairs: pd.DataFrame,
     ks: Sequence[int] = (5, 10, 20),
     all_listing_ids: Iterable[str] | None = None,
     latency_seconds: float | Sequence[float] | None = None,
-) -> dict[str, float | int]:
-    """Compute gold-bearing-listing recall at K, counts, and simple latency.
+) -> dict[str, float | int | str]:
+    """Compare lexical, dense, fixed-budget RRF, and per-channel union recall."""
+    required = {"google_id", "amazon_id"}
+    if not required.issubset(candidates.columns):
+        raise ValueError(f"candidates must contain {sorted(required)}")
+    if not required.issubset(diagnostic_pool.columns):
+        raise ValueError(f"diagnostic_pool must contain {sorted(required)}")
+    if not required.issubset(gold_pairs.columns):
+        raise ValueError(f"gold_pairs must contain {sorted(required)}")
 
-    A candidate is in the union top K when either its lexical rank or dense
-    rank is at most K. A listing is recalled when any of its possible gold
-    catalog partners is retrieved.
-    """
+    primary = candidates.copy()
+    pool = diagnostic_pool.copy()
+    for frame in (primary, pool):
+        frame[["google_id", "amazon_id"]] = frame[["google_id", "amazon_id"]].astype(str)
+        if "gold_injected" in frame:
+            frame.drop(
+                frame.index[frame["gold_injected"].fillna(False).astype(bool)],
+                inplace=True,
+            )
 
-    required_candidates = {"google_id", "amazon_id"}
-    required_gold = {"google_id", "amazon_id"}
-    if not required_candidates.issubset(candidates.columns):
-        raise ValueError(f"candidates must contain {sorted(required_candidates)}")
-    if not required_gold.issubset(gold_pairs.columns):
-        raise ValueError(f"gold_pairs must contain {sorted(required_gold)}")
-
-    candidate_pairs = candidates.copy()
-    if "gold_injected" in candidate_pairs:
-        candidate_pairs = candidate_pairs.loc[
-            ~candidate_pairs["gold_injected"].fillna(False).astype(bool)
-        ].copy()
-    candidate_pairs[["google_id", "amazon_id"]] = candidate_pairs[
-        ["google_id", "amazon_id"]
-    ].astype(str)
     gold = gold_pairs[["google_id", "amazon_id"]].astype(str).drop_duplicates()
     gold_by_listing = gold.groupby("google_id")["amazon_id"].agg(set).to_dict()
-    metrics: dict[str, float | int] = {}
-
-    rank_columns = [
-        column
-        for column in ("lexical_rank", "dense_rank", "rank")
-        if column in candidate_pairs.columns
-    ]
-    if not rank_columns:
-        raise ValueError(
-            "candidates must contain lexical_rank/dense_rank or a combined rank"
-        )
-
+    metrics: dict[str, float | int | str] = {}
     for k in ks:
         if k <= 0:
             raise ValueError("retrieval K values must be positive")
-        channel_masks: dict[str, np.ndarray] = {}
-        for column in rank_columns:
-            ranks = pd.to_numeric(candidate_pairs[column], errors="coerce")
-            channel = column.removesuffix("_rank")
-            channel_masks[channel] = ranks.le(k).fillna(False).to_numpy()
-        union_mask = np.logical_or.reduce(list(channel_masks.values()))
-
-        def _listing_recall(mask: np.ndarray) -> float:
-            retrieved = (
-                candidate_pairs.loc[mask, ["google_id", "amazon_id"]]
-                .groupby("google_id")["amazon_id"]
-                .agg(set)
-                .to_dict()
-            )
-            hits = sum(
-                bool(gold_ids & retrieved.get(google_id, set()))
-                for google_id, gold_ids in gold_by_listing.items()
-            )
-            return float(hits / len(gold_by_listing)) if gold_by_listing else 0.0
-
-        union_recall = _listing_recall(union_mask)
-        metrics[f"recall_at_{k}"] = union_recall
-        metrics[f"union_recall_at_{k}"] = union_recall
-        for channel in ("lexical", "dense"):
-            if channel in channel_masks:
-                metrics[f"{channel}_recall_at_{k}"] = _listing_recall(
-                    channel_masks[channel]
-                )
+        lexical = pd.to_numeric(pool["lexical_rank"], errors="coerce").le(k)
+        dense = pd.to_numeric(pool["dense_rank"], errors="coerce").le(k)
+        rrf = pd.to_numeric(primary["rrf_rank"], errors="coerce").le(k)
+        metrics[f"lexical_recall_at_{k}"] = _listing_recall(
+            pool, lexical, gold_by_listing
+        )
+        metrics[f"dense_recall_at_{k}"] = _listing_recall(pool, dense, gold_by_listing)
+        metrics[f"rrf_recall_at_{k}"] = _listing_recall(primary, rrf, gold_by_listing)
+        metrics[f"union_per_channel_recall_at_{k}"] = _listing_recall(
+            pool, lexical | dense, gold_by_listing
+        )
 
     if all_listing_ids is None:
-        listing_ids = set(candidate_pairs["google_id"].astype(str))
+        listing_ids = set(primary["google_id"])
     else:
         listing_ids = {str(value) for value in all_listing_ids}
-    counts = candidate_pairs.groupby("google_id")["amazon_id"].nunique().to_dict()
-    metrics["mean_candidate_count"] = (
+    counts = primary.groupby("google_id")["amazon_id"].nunique().to_dict()
+    metrics["mean_primary_candidate_count"] = (
         float(np.mean([counts.get(value, 0) for value in listing_ids]))
         if listing_ids
         else 0.0
     )
     metrics["listing_count"] = len(listing_ids)
-
     if latency_seconds is not None:
         latency = np.atleast_1d(np.asarray(latency_seconds, dtype=float))
         metrics["retrieval_latency_seconds"] = float(latency.sum())
@@ -121,9 +113,11 @@ def compute_retrieval_metrics(
             )
             metrics["mean_latency_ms"] = mean_seconds * 1000.0
             if latency.size > 1:
-                metrics["p95_latency_ms"] = float(
-                    np.percentile(latency, 95) * 1000.0
-                )
+                metrics["p95_latency_ms"] = float(np.percentile(latency, 95) * 1000.0)
+        metrics["latency_scope"] = (
+            "Query dense encoding plus exact lexical/dense retrieval and RRF; "
+            "catalog precomputation and model loading excluded."
+        )
     return metrics
 
 
@@ -131,289 +125,308 @@ def compute_pair_metrics(
     y_true: Sequence[int],
     probabilities: Sequence[float],
     classification_threshold: float = 0.5,
-) -> dict[str, float]:
-    """Return discrimination, classification, and calibration metrics."""
-
-    y = np.asarray(y_true, dtype=int)
-    probability = np.asarray(probabilities, dtype=float)
-    if y.shape != probability.shape or y.ndim != 1 or y.size == 0:
-        raise ValueError("y_true and probabilities must be non-empty 1D arrays")
+) -> dict[str, float | int]:
+    """Return pair discrimination, classification, and calibration diagnostics."""
+    y = np.asarray(y_true, dtype=int).reshape(-1)
+    probability = np.asarray(probabilities, dtype=float).reshape(-1)
+    if y.shape != probability.shape or y.size == 0:
+        raise ValueError("y_true and probabilities must be non-empty aligned arrays")
     predicted = probability >= classification_threshold
-    metrics = {
+    return {
+        "count": int(y.size),
+        "positive_count": int(y.sum()),
         "pr_auc": float(average_precision_score(y, probability)),
-        "precision": float(precision_score(y, predicted, zero_division=0)),
-        "recall": float(recall_score(y, predicted, zero_division=0)),
-        "f1": float(f1_score(y, predicted, zero_division=0)),
+        "roc_auc": (
+            float(roc_auc_score(y, probability)) if np.unique(y).size == 2 else 0.0
+        ),
+        "precision_at_0_5": float(precision_score(y, predicted, zero_division=0)),
+        "recall_at_0_5": float(recall_score(y, predicted, zero_division=0)),
+        "f1_at_0_5": float(f1_score(y, predicted, zero_division=0)),
         "brier_score": float(brier_score_loss(y, probability)),
     }
-    metrics["roc_auc"] = (
-        float(roc_auc_score(y, probability)) if np.unique(y).size == 2 else 0.0
-    )
-    return metrics
 
 
-def compute_listing_metrics(
+def compute_calibration_metrics(
+    y_true: Sequence[int], probabilities: Sequence[float]
+) -> dict[str, float | int]:
+    labels = np.asarray(y_true, dtype=int).reshape(-1)
+    scores = np.asarray(probabilities, dtype=float).reshape(-1)
+    if labels.shape != scores.shape or labels.size == 0:
+        raise ValueError("Calibration labels and scores must be non-empty and aligned")
+    return {
+        "count": int(labels.size),
+        "positive_count": int(labels.sum()),
+        "observed_match_rate": float(labels.mean()),
+        "mean_score": float(scores.mean()),
+        "brier_score": float(brier_score_loss(labels, scores)),
+    }
+
+
+def build_listing_predictions(
     candidate_predictions: pd.DataFrame,
     gold_pairs: pd.DataFrame,
-    all_listing_ids: Iterable[str] | None = None,
-) -> dict[str, float | int]:
-    """Evaluate the action on each listing's highest-probability candidate.
+    all_listing_ids: Iterable[str],
+    policy: Mapping[str, Any],
+) -> pd.DataFrame:
+    """Build the single authoritative decision row for every listing."""
+    frame = candidate_predictions.copy()
+    frame[["google_id", "amazon_id"]] = frame[["google_id", "amazon_id"]].astype(str)
+    frame["probability"] = pd.to_numeric(frame["probability"], errors="raise")
+    top = select_top_candidates(frame)
+    listing_ids = {str(value) for value in all_listing_ids}
+    missing = listing_ids - set(top["google_id"])
+    if missing:
+        raise ValueError(f"No retrieved candidates for {len(missing)} listing(s)")
+    top = top.loc[top["google_id"].isin(listing_ids)].copy()
 
-    The end-to-end successful-match rate is the fraction of listings with a
-    gold catalog match that are both ranked first and automatically matched.
-    Gold retrieval failures remain in its denominator.
-    """
-
-    required_predictions = {"google_id", "amazon_id", "probability", "action"}
-    if not required_predictions.issubset(candidate_predictions.columns):
-        raise ValueError(
-            f"candidate_predictions must contain {sorted(required_predictions)}"
-        )
-    if not {"google_id", "amazon_id"}.issubset(gold_pairs.columns):
-        raise ValueError("gold_pairs must contain google_id and amazon_id")
-
-    predictions = candidate_predictions.copy()
-    predictions[["google_id", "amazon_id"]] = predictions[
-        ["google_id", "amazon_id"]
-    ].astype(str)
-    unknown_actions = set(predictions["action"].dropna().unique()) - VALID_ACTIONS
-    if unknown_actions:
-        raise ValueError(f"unknown policy actions: {sorted(unknown_actions)}")
-
-    predictions["probability"] = pd.to_numeric(
-        predictions["probability"], errors="coerce"
-    ).fillna(0.0)
-    predictions = predictions.sort_values(
+    ranked = frame.sort_values(
         ["google_id", "probability", "amazon_id"],
         ascending=[True, False, True],
+        kind="mergesort",
     )
-    best = predictions.drop_duplicates("google_id", keep="first").copy()
+    second_scores = (
+        ranked.groupby("google_id", sort=False)["probability"]
+        .apply(lambda values: float(values.iloc[1]) if len(values) > 1 else 0.0)
+        .to_dict()
+    )
+    top["top1_top2_margin"] = [
+        float(score - second_scores.get(google_id, 0.0))
+        for google_id, score in zip(top["google_id"], top["probability"])
+    ]
 
     gold = gold_pairs[["google_id", "amazon_id"]].astype(str).drop_duplicates()
     gold_set = set(gold.itertuples(index=False, name=None))
     gold_by_listing = gold.groupby("google_id")["amazon_id"].agg(set).to_dict()
-
-    if all_listing_ids is None:
-        listing_ids = set(best["google_id"]) | set(gold["google_id"])
-    else:
-        listing_ids = {str(value) for value in all_listing_ids}
-
-    best = best.set_index("google_id").reindex(sorted(listing_ids)).reset_index()
-    best["action"] = best["action"].fillna("manual_review")
-    best["has_gold_listing"] = best["google_id"].isin(gold_by_listing)
-    best["is_gold_pair"] = [
-        (google_id, amazon_id) in gold_set
-        for google_id, amazon_id in zip(best["google_id"], best["amazon_id"])
-    ]
-
     retrieved_pairs = set(
-        predictions[["google_id", "amazon_id"]]
-        .drop_duplicates()
-        .itertuples(index=False, name=None)
+        frame[["google_id", "amazon_id"]].itertuples(index=False, name=None)
     )
-    gold_retrieved = {
-        google_id: any(
+    top["has_gold_listing"] = top["google_id"].isin(gold_by_listing)
+    top["is_gold_pair"] = [
+        pair in gold_set
+        for pair in top[["google_id", "amazon_id"]].itertuples(index=False, name=None)
+    ]
+    top["gold_retrieved"] = [
+        any(
             (google_id, amazon_id) in retrieved_pairs
-            for amazon_id in amazon_ids
+            for amazon_id in gold_by_listing.get(google_id, set())
         )
-        for google_id, amazon_ids in gold_by_listing.items()
+        for google_id in top["google_id"]
+    ]
+    top["ranking_outcome"] = np.select(
+        [
+            ~top["has_gold_listing"],
+            top["has_gold_listing"] & ~top["gold_retrieved"],
+            top["has_gold_listing"] & top["gold_retrieved"] & ~top["is_gold_pair"],
+        ],
+        ["assumed_no_match", "retrieval_miss", "reranking_miss"],
+        default="top_gold_match",
+    )
+
+    match_threshold = (
+        policy["auto_match"]["threshold"] if policy["auto_match"]["enabled"] else None
+    )
+    no_match_threshold = (
+        policy["auto_no_match"]["threshold"]
+        if policy["auto_no_match"]["enabled"]
+        else None
+    )
+    top["action"] = apply_policy(
+        top["probability"].to_numpy(),
+        match_threshold=match_threshold,
+        no_match_threshold=no_match_threshold,
+    )
+    top["action_correct"] = pd.Series(pd.NA, index=top.index, dtype="boolean")
+    match_mask = top["action"].eq(AUTO_MATCH)
+    no_match_mask = top["action"].eq(AUTO_NO_MATCH)
+    top.loc[match_mask, "action_correct"] = top.loc[match_mask, "is_gold_pair"]
+    top.loc[no_match_mask, "action_correct"] = ~top.loc[
+        no_match_mask, "has_gold_listing"
+    ]
+    return top.sort_values("google_id", kind="mergesort").reset_index(drop=True)
+
+
+def _action_metrics(listings: pd.DataFrame, action: str) -> dict[str, Any]:
+    selected = listings["action"].eq(action)
+    support = int(selected.sum())
+    correct = int(listings.loc[selected, "action_correct"].fillna(False).sum())
+    low, high = wilson_interval(correct, support)
+    return {
+        "support": support,
+        "correct_count": correct,
+        "error_count": support - correct,
+        "empirical_precision": _rate(correct, support) if support else None,
+        "wilson_95_low": low,
+        "wilson_95_high": high,
+        "listing_coverage": _rate(support, len(listings)),
     }
 
-    total = len(best)
-    auto_match = best["action"].eq("auto_match")
-    auto_reject = best["action"].eq("auto_reject")
-    manual_review = best["action"].eq("manual_review")
-    correct_match = auto_match & best["is_gold_pair"]
-    correct_reject = auto_reject & ~best["has_gold_listing"]
-    automatically_decided = auto_match | auto_reject
-    matched_listing_count = len(gold_by_listing)
 
-    def _rate(numerator: int, denominator: int) -> float:
-        return float(numerator / denominator) if denominator else 0.0
-
-    metrics: dict[str, float | int] = {
-        "auto_match_precision": _rate(int(correct_match.sum()), int(auto_match.sum())),
-        "auto_match_coverage": _rate(int(auto_match.sum()), total),
-        "auto_reject_precision": _rate(int(correct_reject.sum()), int(auto_reject.sum())),
-        "auto_reject_coverage": _rate(int(auto_reject.sum()), total),
-        "manual_review_rate": _rate(int(manual_review.sum()), total),
-        "accuracy_on_auto_decisions": _rate(
-            int((correct_match | correct_reject).sum()),
-            int(automatically_decided.sum()),
+def compute_listing_metrics(listing_predictions: pd.DataFrame) -> dict[str, Any]:
+    """Evaluate enabled operational actions on one row per listing."""
+    actions = set(listing_predictions["action"].dropna().astype(str))
+    unknown = actions - {AUTO_MATCH, AUTO_NO_MATCH, MANUAL_REVIEW}
+    if unknown:
+        raise ValueError(f"Unknown policy actions: {sorted(unknown)}")
+    reviewed = listing_predictions["action"].eq(MANUAL_REVIEW)
+    matched = listing_predictions["has_gold_listing"].astype(bool)
+    automatic = ~reviewed
+    correct_automatic = listing_predictions.loc[automatic, "action_correct"].fillna(False)
+    matched_count = int(matched.sum())
+    correct_auto_matches = int(
+        (
+            listing_predictions["action"].eq(AUTO_MATCH)
+            & listing_predictions["is_gold_pair"]
+        ).sum()
+    )
+    return {
+        "listing_count": len(listing_predictions),
+        "auto_match": _action_metrics(listing_predictions, AUTO_MATCH),
+        "auto_no_match": _action_metrics(listing_predictions, AUTO_NO_MATCH),
+        "manual_review_count": int(reviewed.sum()),
+        "manual_review_rate": _rate(int(reviewed.sum()), len(listing_predictions)),
+        "automatic_coverage": _rate(int(automatic.sum()), len(listing_predictions)),
+        "accuracy_on_automatic_decisions": (
+            float(correct_automatic.mean()) if len(correct_automatic) else None
         ),
-        "end_to_end_successful_match_rate": _rate(
-            int(correct_match.sum()), matched_listing_count
+        "matched_listing_count": matched_count,
+        "assumed_no_match_listing_count": int((~matched).sum()),
+        "matched_review_count": int((reviewed & matched).sum()),
+        "matched_review_rate": _rate(int((reviewed & matched).sum()), matched_count),
+        "assumed_no_match_review_count": int((reviewed & ~matched).sum()),
+        "assumed_no_match_review_rate": _rate(
+            int((reviewed & ~matched).sum()), int((~matched).sum())
         ),
-        "matched_listing_count": matched_listing_count,
-        "gold_retrieval_failure_count": int(
-            sum(not was_retrieved for was_retrieved in gold_retrieved.values())
-        ),
-        "listing_count": total,
+        "end_to_end_auto_match_rate": _rate(correct_auto_matches, matched_count),
     }
-    return metrics
 
 
-def model_comparison_rows(
-    y_true: Sequence[int],
-    predictions_by_model: Mapping[str, Sequence[float]],
-    split: str = "validation",
-    classification_threshold: float = 0.5,
-    operational_metrics_by_model: Mapping[str, Mapping[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    """Build rows that can be passed directly to ``pandas.DataFrame``."""
+def compute_no_match_metrics(listing_predictions: pd.DataFrame) -> dict[str, Any]:
+    """Evaluate closed-world listing no-match detection."""
+    labels = (~listing_predictions["has_gold_listing"].astype(bool)).astype(int)
+    scores = 1.0 - listing_predictions["probability"].to_numpy(dtype=float)
+    predicted = listing_predictions["action"].eq(AUTO_NO_MATCH).to_numpy()
+    return {
+        "assumption": "Official mapping absence is treated as no-match.",
+        "count": int(len(labels)),
+        "positive_count": int(labels.sum()),
+        "average_precision": float(average_precision_score(labels, scores)),
+        "precision_at_policy": float(precision_score(labels, predicted, zero_division=0)),
+        "recall_at_policy": float(recall_score(labels, predicted, zero_division=0)),
+    }
 
-    rows: list[dict[str, Any]] = []
-    for model_name, probabilities in predictions_by_model.items():
-        row: dict[str, Any] = {"model": model_name, "split": split}
-        row.update(
-            compute_pair_metrics(y_true, probabilities, classification_threshold)
-        )
-        if operational_metrics_by_model and model_name in operational_metrics_by_model:
-            row.update(operational_metrics_by_model[model_name])
-        rows.append(row)
-    return rows
+
+def normalized_title_signature(value: object) -> str:
+    text = "" if pd.isna(value) else str(value).lower()
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text)).strip()
+
+
+def exact_title_ambiguity_ids(
+    google: pd.DataFrame,
+    amazon: pd.DataFrame,
+    gold_pairs: pd.DataFrame,
+    listing_ids: Iterable[str],
+) -> set[str]:
+    """Return officially unmapped listings colliding with a catalog title."""
+    selected_ids = {str(value) for value in listing_ids}
+    mapped_ids = set(gold_pairs["google_id"].astype(str))
+    catalog_titles = {
+        signature
+        for signature in amazon["title"].map(normalized_title_signature)
+        if signature
+    }
+    selected = google.loc[google["product_id"].astype(str).isin(selected_ids)]
+    return {
+        str(row.product_id)
+        for row in selected.itertuples(index=False)
+        if str(row.product_id) not in mapped_ids
+        and normalized_title_signature(row.title) in catalog_titles
+        and normalized_title_signature(row.title)
+    }
+
+
+def compute_sensitivity_metrics(
+    listing_predictions: pd.DataFrame, ambiguous_listing_ids: set[str]
+) -> dict[str, Any]:
+    retained = listing_predictions.loc[
+        ~listing_predictions["google_id"].astype(str).isin(ambiguous_listing_ids)
+    ].copy()
+    return {
+        "definition": (
+            "Officially unmapped listings with an exact normalized-title Amazon "
+            "collision are excluded, not relabelled."
+        ),
+        "excluded_listing_count": len(listing_predictions) - len(retained),
+        "listing_policy": compute_listing_metrics(retained),
+        "no_match_detection": compute_no_match_metrics(retained),
+    }
 
 
 def extract_error_examples(
     candidate_predictions: pd.DataFrame,
+    listing_predictions: pd.DataFrame,
     gold_pairs: pd.DataFrame,
     max_per_type: int = 10,
-    classification_threshold: float = 0.5,
     google_records: pd.DataFrame | None = None,
     amazon_records: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Extract compact, ranked examples for qualitative error analysis."""
-
-    required = {"google_id", "amazon_id", "probability"}
-    if not required.issubset(candidate_predictions.columns):
-        raise ValueError(f"candidate_predictions must contain {sorted(required)}")
+    """Keep listing-policy errors separate from pair-score diagnostics."""
     if max_per_type <= 0:
         raise ValueError("max_per_type must be positive")
-
-    frame = candidate_predictions.copy()
-    frame[["google_id", "amazon_id"]] = frame[
-        ["google_id", "amazon_id"]
-    ].astype(str)
-    frame["probability"] = pd.to_numeric(frame["probability"], errors="coerce")
-    gold = gold_pairs[["google_id", "amazon_id"]].astype(str).drop_duplicates()
-    gold_set = set(gold.itertuples(index=False, name=None))
-    frame["is_gold_pair"] = [
+    pairs = candidate_predictions.copy()
+    pairs[["google_id", "amazon_id"]] = pairs[["google_id", "amazon_id"]].astype(str)
+    gold_set = set(
+        gold_pairs[["google_id", "amazon_id"]]
+        .astype(str)
+        .itertuples(index=False, name=None)
+    )
+    pairs["is_gold_pair"] = [
         pair in gold_set
-        for pair in frame[["google_id", "amazon_id"]].itertuples(
-            index=False, name=None
-        )
+        for pair in pairs[["google_id", "amazon_id"]].itertuples(index=False, name=None)
     ]
-    frame["predicted_match"] = frame["probability"].ge(classification_threshold)
-    wrong = frame[frame["predicted_match"] != frame["is_gold_pair"]].copy()
-    examples: list[pd.DataFrame] = []
-
-    false_positive = wrong[~wrong["is_gold_pair"]].nlargest(
+    pair_sections: list[pd.DataFrame] = []
+    pair_fp = pairs.loc[(pairs["probability"] >= 0.5) & ~pairs["is_gold_pair"]].nlargest(
         max_per_type, "probability"
     )
-    if not false_positive.empty:
-        false_positive = false_positive.copy()
-        false_positive.insert(0, "error_type", "high_confidence_false_positive")
-        examples.append(false_positive)
-
-    false_negative = wrong[wrong["is_gold_pair"]].nsmallest(
+    if not pair_fp.empty:
+        pair_fp = pair_fp.copy()
+        pair_fp.insert(0, "error_type", "pair_false_positive_at_0_5")
+        pair_sections.append(pair_fp)
+    pair_fn = pairs.loc[(pairs["probability"] < 0.5) & pairs["is_gold_pair"]].nsmallest(
         max_per_type, "probability"
     )
-    if not false_negative.empty:
-        false_negative = false_negative.copy()
-        false_negative.insert(0, "error_type", "high_confidence_false_negative")
-        examples.append(false_negative)
+    if not pair_fn.empty:
+        pair_fn = pair_fn.copy()
+        pair_fn.insert(0, "error_type", "pair_false_negative_at_0_5")
+        pair_sections.append(pair_fn)
 
-    conflict_column = next(
+    listing_rules = (
         (
-            column
-            for column in ("numeric_token_conflict", "numeric_conflict")
-            if column in wrong.columns
+            "false_automatic_match",
+            listing_predictions["action"].eq(AUTO_MATCH)
+            & ~listing_predictions["is_gold_pair"],
         ),
-        None,
+        (
+            "false_automatic_no_match",
+            listing_predictions["action"].eq(AUTO_NO_MATCH)
+            & listing_predictions["has_gold_listing"],
+        ),
+        (
+            "reviewed_top_gold_match",
+            listing_predictions["action"].eq(MANUAL_REVIEW)
+            & listing_predictions["is_gold_pair"],
+        ),
+        ("retrieval_miss", listing_predictions["ranking_outcome"].eq("retrieval_miss")),
+        ("reranking_miss", listing_predictions["ranking_outcome"].eq("reranking_miss")),
     )
-    if conflict_column:
-        numeric_conflicts = wrong[wrong[conflict_column].fillna(0).astype(bool)]
-        numeric_conflicts = numeric_conflicts.nlargest(max_per_type, "probability")
-        if not numeric_conflicts.empty:
-            numeric_conflicts = numeric_conflicts.copy()
-            numeric_conflicts.insert(0, "error_type", "numeric_model_conflict")
-            examples.append(numeric_conflicts)
+    listing_sections: list[pd.DataFrame] = []
+    for name, mask in listing_rules:
+        section = listing_predictions.loc[mask].head(max_per_type).copy()
+        if not section.empty:
+            section.insert(0, "error_type", name)
+            listing_sections.append(section)
 
-    if "title_fuzzy_similarity" in wrong:
-        similar_variant_mask = (
-            ~wrong["is_gold_pair"]
-            & wrong["title_fuzzy_similarity"].fillna(0).ge(0.80)
-        )
-        variant_signals = pd.Series(False, index=wrong.index)
-        if conflict_column:
-            variant_signals |= wrong[conflict_column].fillna(0).astype(bool)
-        if "relative_price_difference" in wrong:
-            variant_signals |= wrong["relative_price_difference"].fillna(0).ge(0.20)
-        likely_variants = wrong[similar_variant_mask & variant_signals].nlargest(
-            max_per_type, "probability"
-        )
-        if not likely_variants.empty:
-            likely_variants = likely_variants.copy()
-            likely_variants.insert(0, "error_type", "likely_similar_variant")
-            examples.append(likely_variants)
-
-    missing_columns = [
-        column
-        for column in (
-            "manufacturer_missing",
-            "missing_manufacturer",
-            "query_manufacturer_missing",
-            "candidate_manufacturer_missing",
-            "price_missing",
-            "missing_price",
-            "query_price_missing",
-            "candidate_price_missing",
-        )
-        if column in wrong.columns
-    ]
-    if missing_columns:
-        missing_mask = wrong[missing_columns].fillna(0).astype(bool).any(axis=1)
-        missing = wrong[missing_mask].nlargest(max_per_type, "probability")
-        if not missing.empty:
-            missing = missing.copy()
-            missing.insert(0, "error_type", "missing_manufacturer_or_price")
-            examples.append(missing)
-
-    retrieved_by_listing = (
-        frame.groupby("google_id")["amazon_id"].agg(set).to_dict()
-    )
-    gold_by_listing = gold.groupby("google_id")["amazon_id"].agg(set).to_dict()
-    missed_listing_ids = {
-        google_id
-        for google_id, amazon_ids in gold_by_listing.items()
-        if not (amazon_ids & retrieved_by_listing.get(google_id, set()))
-    }
-    missed_gold = (
-        gold.loc[gold["google_id"].isin(missed_listing_ids)]
-        .drop_duplicates("google_id")
-        .head(max_per_type)
-    )
-    if not missed_gold.empty:
-        missed_gold = missed_gold.copy()
-        missed_gold.insert(0, "error_type", "gold_match_missed_by_retrieval")
-        missed_gold["probability"] = np.nan
-        missed_gold["is_gold_pair"] = True
-        missed_gold["predicted_match"] = False
-        examples.append(missed_gold)
-
-    if not examples:
-        result = pd.DataFrame(
-            columns=[
-                "error_type",
-                "google_id",
-                "amazon_id",
-                "probability",
-                "is_gold_pair",
-                "predicted_match",
-            ]
-        )
-    else:
-        result = pd.concat(examples, ignore_index=True, sort=False)
+    sections = pair_sections + listing_sections
+    result = pd.concat(sections, ignore_index=True, sort=False) if sections else pd.DataFrame()
     result = _merge_product_context(result, google_records, "google_id", "google")
     return _merge_product_context(result, amazon_records, "amazon_id", "amazon")
 
@@ -424,7 +437,7 @@ def _merge_product_context(
     pair_id_column: str,
     prefix: str,
 ) -> pd.DataFrame:
-    if records is None:
+    if records is None or examples.empty or pair_id_column not in examples:
         return examples
     record_id_column = "product_id" if "product_id" in records else "id"
     fields = [
@@ -447,13 +460,15 @@ def _merge_product_context(
 
 
 def save_evaluation_plots(
-    y_true: Sequence[int],
-    probabilities: Sequence[float],
+    pair_y_true: Sequence[int],
+    pair_probabilities: Sequence[float],
+    top_y_true: Sequence[int],
+    top_probabilities: Sequence[float],
     retrieval_metrics: Mapping[str, Any],
     output_dir: str | Path,
+    split_label: str,
 ) -> list[Path]:
-    """Save retrieval recall, PR, and reliability plots."""
-
+    """Save retrieval, pair PR, and separately labelled calibration plots."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -461,51 +476,32 @@ def save_evaluation_plots(
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    y = np.asarray(y_true, dtype=int)
-    probability = np.asarray(probabilities, dtype=float)
     paths: list[Path] = []
-
-    recall_keys = list(retrieval_metrics)
-    for channel in ("lexical", "dense", "union"):
-        channel_metrics = retrieval_metrics.get(channel)
-        if isinstance(channel_metrics, Mapping):
-            recall_keys.extend(channel_metrics)
-    recall_ks = sorted(
+    ks = sorted(
         {
             int(str(key).rsplit("_", 1)[-1])
-            for key in recall_keys
-            if "recall" in str(key) and str(key).rsplit("_", 1)[-1].isdigit()
+            for key in retrieval_metrics
+            if "recall_at_" in str(key) and str(key).rsplit("_", 1)[-1].isdigit()
         }
     )
-    if not recall_ks:
-        recall_ks = [5, 10, 20]
-    path = output / "retrieval_recall.png"
-    fig, axis = plt.subplots(figsize=(7, 4))
-    positions = np.arange(len(recall_ks), dtype=float)
-    width = 0.25
-    for offset, (channel, label) in enumerate(
-        (("lexical", "Lexical"), ("dense", "Dense"), ("union", "Union"))
-    ):
-        values = []
-        for k in recall_ks:
-            key = f"{channel}_recall_at_{k}"
-            fallback = f"recall_at_{k}" if channel == "union" else key
-            channel_metrics = retrieval_metrics.get(channel, {})
-            nested = (
-                channel_metrics.get(f"recall_at_{k}")
-                if isinstance(channel_metrics, Mapping)
-                else None
-            )
-            value = retrieval_metrics.get(
-                key, retrieval_metrics.get(fallback, nested if nested is not None else 0.0)
-            )
-            values.append(float(value))
-        axis.bar(positions + (offset - 1) * width, values, width, label=label)
+    path = output / f"{split_label}_retrieval_recall.png"
+    fig, axis = plt.subplots(figsize=(8, 4))
+    positions = np.arange(len(ks), dtype=float)
+    width = 0.2
+    channels = (
+        ("lexical", "Lexical"),
+        ("dense", "Dense"),
+        ("rrf", "RRF fixed-budget"),
+        ("union_per_channel", "Union per channel"),
+    )
+    for offset, (key_prefix, label) in enumerate(channels):
+        values = [float(retrieval_metrics[f"{key_prefix}_recall_at_{k}"]) for k in ks]
+        axis.bar(positions + (offset - 1.5) * width, values, width, label=label)
     axis.set(
         xticks=positions,
-        xticklabels=[f"Recall@{k}" for k in recall_ks],
+        xticklabels=[f"Recall@{k}" for k in ks],
         ylabel="Gold-bearing listings retrieved",
-        title="Test candidate retrieval",
+        title=f"{split_label.title()} candidate retrieval",
         ylim=(0, 1.05),
     )
     axis.legend()
@@ -514,29 +510,17 @@ def save_evaluation_plots(
     plt.close(fig)
     paths.append(path)
 
-    precision, recall, _ = precision_recall_curve(y, probability)
-    path = output / "precision_recall_curve.png"
+    pair_y = np.asarray(pair_y_true, dtype=int)
+    pair_scores = np.asarray(pair_probabilities, dtype=float)
+    precision, recall, _ = precision_recall_curve(pair_y, pair_scores)
+    path = output / f"{split_label}_pair_precision_recall_curve.png"
     fig, axis = plt.subplots(figsize=(6, 4))
     axis.plot(recall, precision)
-    axis.axhline(y.mean(), color="gray", linestyle="--", label="prevalence")
-    axis.set(xlabel="Recall", ylabel="Precision", title="Test precision-recall curve")
-    axis.legend()
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    paths.append(path)
-
-    observed, predicted = calibration_curve(y, probability, n_bins=10, strategy="uniform")
-    path = output / "reliability_plot.png"
-    fig, axis = plt.subplots(figsize=(6, 4))
-    axis.plot([0, 1], [0, 1], color="gray", linestyle="--", label="ideal")
-    axis.plot(predicted, observed, marker="o", label="model")
+    axis.axhline(pair_y.mean(), color="gray", linestyle="--", label="prevalence")
     axis.set(
-        xlabel="Mean predicted probability",
-        ylabel="Observed match rate",
-        title="Test reliability",
-        xlim=(0, 1),
-        ylim=(0, 1),
+        xlabel="Recall",
+        ylabel="Precision",
+        title=f"{split_label.title()} pair PR curve",
     )
     axis.legend()
     fig.tight_layout()
@@ -544,61 +528,77 @@ def save_evaluation_plots(
     plt.close(fig)
     paths.append(path)
 
+    for prefix, title, labels, scores in (
+        ("pair", f"{split_label.title()} pair-level reliability", pair_y, pair_scores),
+        (
+            "top_candidate",
+            f"{split_label.title()} top-candidate reliability",
+            np.asarray(top_y_true, dtype=int),
+            np.asarray(top_probabilities, dtype=float),
+        ),
+    ):
+        observed, predicted = calibration_curve(labels, scores, n_bins=10, strategy="uniform")
+        path = output / f"{split_label}_{prefix}_reliability_plot.png"
+        fig, axis = plt.subplots(figsize=(6, 4))
+        axis.plot([0, 1], [0, 1], color="gray", linestyle="--", label="ideal")
+        axis.plot(predicted, observed, marker="o", label="model")
+        axis.set(
+            xlabel="Mean pair match score",
+            ylabel="Observed match rate",
+            title=title,
+            xlim=(0, 1),
+            ylim=(0, 1),
+        )
+        axis.legend()
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+        paths.append(path)
     return paths
 
 
-def save_evaluation_reports(
+def save_stage_reports(
     reports_dir: str | Path,
-    retrieval: Mapping[str, Any],
-    pair_matching: Mapping[str, Any],
-    abstention: Mapping[str, Any],
-    model_comparison: Sequence[Mapping[str, Any]] | pd.DataFrame,
+    split_label: str,
+    metrics: Mapping[str, Any],
+    model_comparison: pd.DataFrame,
+    threshold_diagnostics: Sequence[Mapping[str, Any]],
+    listing_predictions: pd.DataFrame,
     error_examples: pd.DataFrame,
-    y_true: Sequence[int],
-    probabilities: Sequence[float],
-    match_threshold: float,
-    reject_threshold: float,
+    pair_y_true: Sequence[int],
+    pair_probabilities: Sequence[float],
+    top_y_true: Sequence[int],
+    top_probabilities: Sequence[float],
+    retrieval_metrics: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Write the compact metrics, CSV, and plot bundle used by the README."""
-
+    """Write one validation or final-test report bundle."""
     output = Path(reports_dir)
     output.mkdir(parents=True, exist_ok=True)
-    metrics_path = output / "metrics.json"
-    comparison_path = output / "model_comparison.csv"
-    errors_path = output / "error_examples.csv"
-
-    metrics = {
-        "retrieval": dict(retrieval),
-        "pair_matching": dict(pair_matching),
-        "abstention": dict(abstention),
-        "thresholds": {
-            "match_threshold": float(match_threshold),
-            "reject_threshold": float(reject_threshold),
-        },
+    paths = {
+        "metrics": output / "metrics.json",
+        "model_comparison": output / "model_comparison.csv",
+        "precision_coverage": output / "validation_precision_coverage.csv",
+        "listing_predictions": output / f"{split_label}_listing_predictions.csv",
+        "error_examples": output / f"{split_label}_error_examples.csv",
     }
-    with metrics_path.open("w", encoding="utf-8") as handle:
-        json.dump(_json_ready(metrics), handle, indent=2, sort_keys=True)
-        handle.write("\n")
-
-    comparison = (
-        model_comparison.copy()
-        if isinstance(model_comparison, pd.DataFrame)
-        else pd.DataFrame(model_comparison)
+    paths["metrics"].write_text(
+        json.dumps(_json_ready(metrics), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
-    comparison.to_csv(comparison_path, index=False)
-    error_examples.to_csv(errors_path, index=False)
+    model_comparison.to_csv(paths["model_comparison"], index=False)
+    pd.DataFrame(threshold_diagnostics).to_csv(paths["precision_coverage"], index=False)
+    listing_predictions.to_csv(paths["listing_predictions"], index=False)
+    error_examples.to_csv(paths["error_examples"], index=False)
     plot_paths = save_evaluation_plots(
-        y_true,
-        probabilities,
-        retrieval,
+        pair_y_true,
+        pair_probabilities,
+        top_y_true,
+        top_probabilities,
+        retrieval_metrics,
         output,
+        split_label,
     )
-    return {
-        "metrics": metrics_path,
-        "model_comparison": comparison_path,
-        "error_examples": errors_path,
-        "plots": plot_paths,
-    }
+    return {**paths, "plots": plot_paths}
 
 
 def _json_ready(value: Any) -> Any:
@@ -610,6 +610,11 @@ def _json_ready(value: Any) -> Any:
         return value.item()
     if isinstance(value, Path):
         return str(value)
-    if pd.isna(value):
+    if value is pd.NA:
         return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
     return value

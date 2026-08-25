@@ -1,6 +1,6 @@
 # Data
 
-`python run_pipeline.py` downloads and extracts the Amazon–Google Products
+`python run_pipeline.py --stage develop` downloads and extracts the Amazon–Google Products
 benchmark automatically when `data/raw/` is empty.
 
 If automatic download is unavailable, download
@@ -15,4 +15,3 @@ and extract these files into `data/raw/`:
 The misspelling in the mapping filename is present in the original archive.
 Raw data is excluded from Git. The benchmark page provides the applicable
 license and attribution information.
-

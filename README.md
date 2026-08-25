@@ -1,193 +1,228 @@
 # Cold-Start Catalog Product Identity with Abstention
 
 This compact entity-resolution project treats Google product rows as incoming
-seller listings and Amazon rows as an existing canonical catalog. It retrieves
-plausible candidates, estimates whether each candidate is the same underlying
-product, and chooses one of three operational actions: `auto_match`,
-`auto_reject`, or `manual_review`.
+seller listings and Amazon rows as a fixed reference catalog. It retrieves a
+fixed number of catalog candidates, scores each candidate pair with a small
+logistic matcher, selects one top candidate per listing, and emits one of three
+listing-level actions: `auto_match`, `auto_no_match`, or `manual_review`.
 
-The project is intentionally interview-sized. It demonstrates retrieval,
-interpretable pair matching, calibrated probabilities, and validation-selected
-abstention without an API, database, model registry, or deployment stack.
+The project is intentionally interview-sized. It keeps exact retrieval, a
+transparent feature set, grouped calibration, and a simple Streamlit demo. It
+does not add an API, database, model registry, approximate index, deployment
+stack, or broader model family.
 
-## Business problem
+## Development checkpoint
 
-Product identity asks whether two records describe the same sellable product,
-including the same model or variant. This differs from search relevance: a
-compatible accessory or a newer edition can be highly relevant to a query but
-must still be rejected as a catalog identity match.
+The duplicate-aware correction pass has completed its development stage only.
+All values below are training/validation results from `split_seed: 20260825`
+and `model_seed: 42`. The complete final-test membership has been saved, but
+during this corrected development run no test listing has been encoded,
+retrieved, featured, scored, evaluated, or inspected. The final holdout remains
+unrun pending separate approval. Previously published pre-correction test
+results are treated only as development diagnostics, not final evidence.
 
-Abstention makes that distinction operational. Confident matches can be linked,
-confident no-match listings can be rejected, and ambiguous variants can be sent
-to a human reviewer.
+The authoritative machine-readable development output is
+[`reports/metrics.json`](reports/metrics.json).
 
-## Dataset and task construction
+## Dataset, split, and label assumptions
 
 The project uses the public
 [Amazon–Google Products entity-resolution benchmark](https://dbs.uni-leipzig.de/research/projects/benchmark-datasets-for-entity-resolution).
-The pipeline downloads the two source tables and the perfect mapping from the
-official archive. It uses all Google rows, including listings with no gold
-Amazon partner, so automatic rejection is evaluated on natural no-match cases.
+The normalized data contains 1,363 Amazon products, 3,226 Google listings, and
+1,300 official gold pairs. The Amazon catalog remains available in every split.
 
-Gold links form a bipartite graph and are not one-to-one. Google listings in the
-same connected component are kept in one deterministic 70%/15%/15% split. The
-Amazon table is a fixed reference catalog available to every split, matching the
-cold-start setting. The character TF-IDF vectorizer is fitted on the known
-catalog and training Google text only; validation and test Google text do not
-influence fitted preprocessing.
+Before gold-link components are assigned, Google records are grouped by an
+exact normalized signature of title, manufacturer, description, and parsed
+price. No fuzzy duplicate clustering is used. The resulting split has 2,258
+training listings, 484 validation listings, and 484 reserved final-test
+listings. It contains 93 exact-duplicate groups covering 234 rows; no duplicate
+group crosses a split. One unmapped member of a mixed mapped/unmapped duplicate
+group is flagged as ambiguous and excluded as a definite training negative.
 
-## Approach
+The official benchmark is the primary evaluation. Under its closed-world
+assumption, a Google listing absent from the mapping is treated as no-match.
+That assumption is imperfect: an unmapped listing can still collide with an
+Amazon title. A secondary sensitivity result therefore excludes exact
+normalized-title collisions without relabelling them as positives. Fuzzy
+collisions are not silently relabelled.
 
-Candidate retrieval unions two exact-search methods:
-
-- Character n-gram TF-IDF cosine similarity.
-- Frozen `sentence-transformers/all-MiniLM-L6-v2` cosine similarity.
-
-Training candidates use retrieved hard negatives and inject missing gold
-partners only for training. Validation and test retrieval are never forced.
-
-The matcher is sigmoid-calibrated logistic regression over a small feature set:
-lexical and dense cosine scores, title overlap and fuzzy similarity,
-manufacturer agreement, model-number overlap/conflict, relative price
-difference, and missing-value indicators. A validation grid chooses match and
-reject thresholds that maximize automatic coverage while targeting 95% precision
-for both automatic actions.
-
-## Verified results
-
-These values come from the successful real-data run on 2026-08-25 with seed 42.
-The held-out test split contains 484 Google listings, including 192 with at
-least one gold Amazon match. The authoritative full output is
-[`reports/metrics.json`](reports/metrics.json).
+## Method
 
 ### Retrieval
 
-Recall is the fraction of gold-bearing listings for which any correct Amazon
-partner was retrieved. “Union” combines each retriever's top-K results, so it
-can contain up to `2K` distinct candidates.
+Two exact-search channels retrieve candidates:
+
+- Character n-gram TF-IDF cosine similarity. The vectorizer is fitted on the
+  fixed Amazon catalog plus training Google text only.
+- Frozen `sentence-transformers/all-MiniLM-L6-v2` cosine similarity.
+
+Reciprocal-rank fusion with constant 60 combines the two channel rankings and
+truncates them to exactly 20 candidates per listing. This fixed-budget `RRF@20`
+set is the primary retriever. The lexical-top-20 plus dense-top-20 union, which
+can contain up to 40 distinct candidates, remains clearly labelled as a
+diagnostic only. Missing gold candidates are injected only into training; 13
+training listings required injection. Validation retrieval is unforced.
+
+### Matcher and top-candidate decision
+
+Four predeclared sigmoid-calibrated logistic variants are compared on
+validation: lexical, dense, the current hybrid feature set, and hybrid plus
+three simple retrieval-rank signals. Selection uses validation overall Hit@1,
+then MRR, then fewer features, then declared model order. The final test is not
+used for model selection.
+
+Every candidate receives a pair match score. Exactly one top candidate is then
+selected per listing by score descending and Amazon ID ascending. Thresholds
+and operational actions apply only to that row; non-top candidates retain
+scores but receive no action. The same rule is used in validation, reporting,
+error analysis, final-test code, and Streamlit.
+
+### Ranking metric definitions
+
+- **Overall Hit@1** is evaluated only over gold-bearing listings. Retrieval and
+  reranking misses contribute zero.
+- **Conditional Hit@1** is evaluated only over gold-bearing listings for which
+  at least one gold Amazon partner was retrieved.
+- **MRR** is evaluated only over gold-bearing listings. If a listing has
+  multiple gold partners, the highest-ranked gold partner is used; retrieval
+  misses contribute zero.
+
+## Validation results
+
+### Fixed-budget retrieval
+
+Recall is the fraction of validation gold-bearing listings for which at least
+one gold Amazon partner is present.
 
 | Retriever | Recall@5 | Recall@10 | Recall@20 |
 |---|---:|---:|---:|
-| Character TF-IDF | 0.880 | 0.938 | 0.974 |
-| MiniLM dense | 0.875 | 0.943 | 0.964 |
-| Union | **0.953** | **0.974** | **0.995** |
+| Character TF-IDF | 0.9158 | 0.9474 | 0.9684 |
+| MiniLM dense | 0.9421 | 0.9632 | 0.9947 |
+| Fixed-budget RRF | 0.9474 | 0.9737 | 0.9947 |
+| Union@K-per-channel diagnostic | 0.9842 | 0.9895 | 1.0000 |
 
-At the configured top-20 cutoff, the deduplicated union averaged 32.93
-candidates per listing. Warm per-listing retrieval averaged 13.94 ms with a
-15.16 ms p95 in this local run; this includes query text transformation, dense
-encoding, and both exact searches, but excludes model loading and catalog
-precomputation. One of 192 matched test listings was missed by the union.
+The primary RRF set contains exactly 20 candidates for each of the 484
+validation listings. It retrieved a gold partner for 189 of 190 gold-bearing
+listings.
 
-### Matcher comparison and held-out pair metrics
+### Model comparison and ranking
 
-Validation PR-AUC increased from 0.316 for raw lexical cosine to 0.471 for the
-lexical logistic model and 0.560 for the hybrid logistic model. The hybrid was
-selected. Its validation policy met both configured precision constraints with
-thresholds of 0.97 for matching and 0.01 for rejection.
+| Logistic variant | Features | Overall Hit@1 | Conditional Hit@1 | MRR |
+|---|---:|---:|---:|---:|
+| Lexical | 5 | 0.8526 | 0.8571 | 0.9062 |
+| Dense | 1 | 0.6737 | 0.6772 | 0.7902 |
+| **Current hybrid (selected)** | **15** | **0.8684** | **0.8730** | **0.9254** |
+| Hybrid plus rank signals | 18 | 0.8474 | 0.8519 | 0.9162 |
 
-| Test pair metric | Value |
-|---|---:|
-| PR-AUC | 0.543 |
-| ROC-AUC | 0.988 |
-| Precision at 0.5 | 0.677 |
-| Recall at 0.5 | 0.438 |
-| F1 at 0.5 | 0.532 |
-| Brier score | 0.0074 |
+For the selected hybrid, 165 of 190 gold-bearing listings place a gold partner
+first. Of the 25 remaining gold-bearing listings, one is a retrieval miss and
+24 are reranking misses. The validation pair PR-AUC is 0.6441; pair-level
+metrics remain matcher diagnostics rather than listing-policy results.
 
-PR-AUC is reported as scikit-learn average precision, the standard non-
-interpolated summary of the precision-recall curve.
+### Pair-level and top-candidate calibration
 
-Pair metrics are conditional on the unforced retrieved candidate set. The
-end-to-end metric below separately counts retrieval failures.
+The model is calibrated on candidate pairs, but the operational policy acts on
+the maximum score per listing. The two diagnostics are therefore reported
+separately and the UI calls the value a **pair match score**, not a calibrated
+match probability.
 
-### Abstention policy
+| Calibration diagnostic | Rows | Positive rate | Mean score | Brier score |
+|---|---:|---:|---:|---:|
+| Candidate pairs | 9,680 | 0.0197 | 0.0183 | 0.0103 |
+| Top candidate per listing | 484 | 0.3409 | 0.2321 | 0.1453 |
 
-| Held-out listing metric | Value |
-|---|---:|
-| Auto-match precision | 0.667 |
-| Auto-match coverage | 0.006 |
-| Auto-reject precision | 0.974 |
-| Auto-reject coverage | 0.318 |
-| Manual-review rate | 0.676 |
-| Accuracy on automatic decisions | 0.968 |
-| End-to-end successful-match rate | 0.010 |
+### Closed-world no-match detection
 
-The 95% targets are validation constraints, not guarantees. On test, only three
-listings crossed the very conservative match threshold and two were correct, so
-auto-match precision fell to 66.7%. Most listings were reviewed, and only 1.0%
-of gold-bearing listings ended as correct automatic matches despite 99.5%
-retrieval recall@20. This is an important negative result: the model ranking is
-useful, but this small validation set did not support a high-coverage,
-high-precision automatic-match policy.
+| Evaluation | Listings | No-match AP | Policy precision | Policy recall |
+|---|---:|---:|---:|---:|
+| Primary official labels | 484 | 0.9483 | 0.9515 | 0.7347 |
+| Exact-title sensitivity | 478 | 0.9542 | 0.9515 | 0.7500 |
 
-## Error analysis
+The sensitivity row excludes six officially unmapped validation listings with
+an exact normalized-title Amazon collision. It does not convert them to
+positives.
 
-[`reports/error_examples.csv`](reports/error_examples.csv) contains ten examples
-each for high-confidence false positives, low-scored gold pairs, likely similar
-variants, numeric/model conflicts, and errors involving missing manufacturer or
-price, plus the one retrieval miss.
+### Independent automatic-action feasibility
 
-- The highest-scoring false positive paired two `macbackup` records with the
-  same title and price but no benchmark gold link. The Google manufacturer is
-  missing while Amazon says `macware`; this illustrates both missing-field risk
-  and possible ambiguity in old offline labels.
-- Similar-title products can still be different variants. An observed example
-  paired `norton antivirus 2004` with `norton antivirus 2007`; the explicit model
-  conflict kept it in manual review rather than auto-match.
-- Several gold pairs have large naming and price shifts. `tinyterm v.4.3x` and an
-  Acrobat 8 upgrade example received probabilities below 0.004 and were
-  automatically rejected.
-- Google manufacturer is absent for most source records, so the matcher often
-  cannot use brand agreement to resolve otherwise identical titles.
-- The sole retrieval miss was `simply magazine sales skills` versus Amazon's
-  `sales skills 2.0 ages 10+`, where both lexical and dense retrieval failed to
-  place the gold item in the union top 20.
+Each action is screened independently on validation top-candidate rows. A
+threshold is feasible only when its action region has at least 20 decisions and
+empirical precision of at least 0.95. Wilson intervals are uncertainty
+diagnostics, not feasibility constraints or population guarantees. A disabled
+action uses a null threshold and cannot emit decisions.
 
-These categories are diagnostic slices rather than statistically complete root
-causes. The similar-variant category is a heuristic based on high title
-similarity plus a model-token conflict or substantial price difference.
+When both independently selected actions overlap, compatible feasible pairs are
+compared by combined coverage. Exact ties prefer the lower no-match threshold,
+then the higher match threshold. If only one action can be enabled, coverage
+and empirical precision are compared before the stable action order
+`auto_no_match`, then `auto_match`.
+
+| Action | Enabled | Threshold | Support | Correct | Errors | Empirical precision | 95% Wilson interval | Coverage |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `auto_match` | No | null | 0 | 0 | 0 | — | — | 0.0000 |
+| `auto_no_match` | Yes | 0.03 | 227 | 216 | 11 | 0.9515 | [0.9153, 0.9727] | 0.4690 |
+
+`both_constraints_met` is false because no auto-match threshold met both the
+precision and support requirements. The policy therefore enables only
+`auto_no_match`; all other score regions become `manual_review`. Overall, 257
+of 484 listings are reviewed. Review rates are 179/190 (0.9421) for mapped
+listings and 78/294 (0.2653) for assumed-no-match listings.
+
+The compact threshold diagnostic is
+[`reports/validation_precision_coverage.csv`](reports/validation_precision_coverage.csv).
+
+## Reports and artifacts
+
+- [`reports/metrics.json`](reports/metrics.json): complete development metrics
+  and explicit final-test access flags.
+- [`reports/model_comparison.csv`](reports/model_comparison.csv): the four
+  validation model variants and selection result.
+- [`reports/validation_listing_predictions.csv`](reports/validation_listing_predictions.csv):
+  one authoritative top-candidate/action row per validation listing.
+- [`reports/validation_error_examples.csv`](reports/validation_error_examples.csv):
+  listing-policy error categories kept separate from pair-score diagnostics.
+- [`reports/validation_precision_coverage.csv`](reports/validation_precision_coverage.csv):
+  supported and unsupported threshold points with the selected row marked.
+- `reports/validation_*.png`: fixed-budget retrieval, pair PR, pair-level
+  reliability, and top-candidate reliability plots.
+- `artifacts/`: frozen vectorizer, catalog matrices, matcher, split assignment,
+  policy, and configuration snapshot for the separately authorized final stage
+  and Streamlit demo.
 
 ## Install and run
 
-Python 3.12 is recommended. The following `uv` commands were used for the
-verified run and keep the package cache inside the project:
+Python 3.12 is recommended. Using `uv`:
 
 ```bash
 UV_CACHE_DIR=.uv-cache uv venv --python 3.12
 source .venv/bin/activate
 UV_CACHE_DIR=.uv-cache uv pip install --python .venv/bin/python -r requirements.txt
-python run_pipeline.py
 pytest -q
+python run_pipeline.py --stage develop
 streamlit run app.py
 ```
 
-If Python 3.12 and `pip` are already installed, a standard virtual environment
-works too: replace the first and third commands with `python3.12 -m venv .venv`
-and `python -m pip install -r requirements.txt`.
+The first development run needs network access only if the benchmark or frozen
+sentence encoder is not already cached. The project also implements the frozen
+holdout command:
 
-The first pipeline run needs network access for the dataset and frozen sentence
-encoder. Later runs reuse the downloaded data and normal model cache. The demo
-expects artifacts produced by `python run_pipeline.py`.
+```bash
+python run_pipeline.py --stage final-test
+```
 
-## Outputs
+Do not invoke that command until the development implementation and validation
+outputs have received explicit approval. The final test is intended to be
+evaluated exactly once without changing retrieval, features, model, thresholds,
+ambiguity handling, or reporting afterward.
 
-- `reports/metrics.json`: held-out retrieval, pair, and abstention metrics.
-- `reports/model_comparison.csv`: validation model comparison.
-- `reports/error_examples.csv`: selected real test errors.
-- `reports/*.png`: retrieval, precision-recall, and reliability plots.
-- `artifacts/`: the small set of files required by the Streamlit demo.
+## Limitations
 
-## Limitations and production extensions
-
-- The benchmark is small and old, so its language, catalog mix, and noise do not
-  represent a modern marketplace.
-- Offline pair labels do not reproduce every seller-listing problem, open-world
-  catalog change, or downstream business cost.
-- Precision targets and manual-review capacity are illustrative rather than
-  estimated from a real operation.
-- Exact cosine search is appropriate here but would need an approximate nearest
-  neighbour index at large catalog scale.
-- The model uses text and price only. A production matcher could add category,
-  brand normalization, stronger model-number parsing, images, and reviewer
-  feedback.
-- The system is an interview project, not a production catalog service.
+- The benchmark is small and old, and mapping absence is only a closed-world
+  no-match assumption.
+- High validation retrieval recall does not imply a high-coverage automatic
+  match policy; the current validation evidence supports no automatic matches.
+- Pair-level calibration does not establish calibration of the selected maximum
+  score, so both views are reported separately.
+- The precision thresholds and minimum support are development criteria, not
+  claims of 95% population precision.
+- Exact cosine search and the small Streamlit UI are appropriate for this
+  portfolio-scale project, not a production catalog service.

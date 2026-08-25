@@ -13,7 +13,7 @@ import yaml
 from scipy import sparse
 
 from src.features import build_pair_features
-from src.model import predict_probabilities
+from src.model import predict_probabilities, select_top_candidates
 from src.policy import apply_policy
 from src.retrieval import encode_products, load_sentence_encoder, retrieve_candidates
 
@@ -36,7 +36,9 @@ def load_demo_assets(config: dict):
     missing = [str(path) for path in required.values() if not path.exists()]
     if missing:
         raise FileNotFoundError(
-            "Missing pipeline artifacts: " + ", ".join(missing) + ". Run python run_pipeline.py first."
+            "Missing pipeline artifacts: "
+            + ", ".join(missing)
+            + ". Run python run_pipeline.py --stage develop first."
         )
 
     vectorizer = joblib.load(required["vectorizer"])
@@ -113,6 +115,7 @@ def main() -> None:
         query_embedding,
         catalog_dense,
         top_k=int(matcher["top_k"]),
+        rrf_constant=float(matcher["rrf_constant"]),
     )
     features = build_pair_features(
         candidates,
@@ -123,36 +126,45 @@ def main() -> None:
         record_id_column="product_id",
     )
     probabilities = predict_probabilities(matcher, features)
-    thresholds = matcher["thresholds"]
-    actions = apply_policy(
-        probabilities,
-        match_threshold=float(thresholds["match_threshold"]),
-        reject_threshold=float(thresholds["reject_threshold"]),
-    )
-
     results = candidates.copy()
-    results["match_probability"] = probabilities
-    results["pair_action"] = actions
+    results["probability"] = probabilities
     results = results.merge(
         catalog[
             ["product_id", "title", "manufacturer", "description", "price"]
         ].rename(columns={"product_id": "amazon_id"}),
         on="amazon_id",
         how="left",
-    ).sort_values(["match_probability", "amazon_id"], ascending=[False, True])
+    )
 
-    best = results.iloc[0]
-    st.subheader(f"Decision: {best['pair_action']}")
+    best = select_top_candidates(results).iloc[0]
+    policy = matcher["policy"]
+    decision = apply_policy(
+        float(best["probability"]),
+        match_threshold=(
+            policy["auto_match"]["threshold"]
+            if policy["auto_match"]["enabled"]
+            else None
+        ),
+        no_match_threshold=(
+            policy["auto_no_match"]["threshold"]
+            if policy["auto_no_match"]["enabled"]
+            else None
+        ),
+    )
+    st.subheader(f"Decision: {decision}")
     st.write(
         f"Best candidate: **{best['title']}**  \n"
-        f"Calibrated match probability: **{best['match_probability']:.3f}**"
+        f"Pair match score: **{best['probability']:.3f}**"
+    )
+    results = results.sort_values(
+        ["probability", "amazon_id"], ascending=[False, True], kind="mergesort"
     )
     display_columns = [
         "amazon_id",
         "title",
         "manufacturer",
         "price",
-        "match_probability",
+        "probability",
         "lexical_score",
         "dense_score",
     ]

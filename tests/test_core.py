@@ -9,10 +9,10 @@ import numpy as np
 import pandas as pd
 
 from src.data import make_entity_splits
-from src.evaluate import compute_listing_metrics
+from src.evaluate import build_listing_predictions
 from src.features import HYBRID_FEATURE_COLUMNS, build_pair_features, pair_feature
 from src.model import fit_calibrated_logistic, predict_probabilities
-from src.policy import apply_policy
+from src.policy import apply_policy, select_thresholds
 from src.retrieval import fit_lexical_retriever, retrieve_candidates
 
 
@@ -95,32 +95,16 @@ def test_policy_threshold_boundaries_are_inclusive() -> None:
     actions = apply_policy(
         np.array([0.0, 0.2, 0.2001, 0.7999, 0.8, 1.0]),
         match_threshold=0.8,
-        reject_threshold=0.2,
+        no_match_threshold=0.2,
     )
     assert actions.tolist() == [
-        "auto_reject",
-        "auto_reject",
+        "auto_no_match",
+        "auto_no_match",
         "manual_review",
         "manual_review",
         "auto_match",
         "auto_match",
     ]
-
-    listing_metrics = compute_listing_metrics(
-        pd.DataFrame(
-            [
-                ("g_matched", "wrong_candidate", 0.1, "auto_reject"),
-                ("g_unmatched", "any_candidate", 0.1, "auto_reject"),
-            ],
-            columns=["google_id", "amazon_id", "probability", "action"],
-        ),
-        pd.DataFrame(
-            [("g_matched", "gold_candidate")],
-            columns=["google_id", "amazon_id"],
-        ),
-    )
-    assert listing_metrics["auto_reject_precision"] == 0.5
-
 
 def test_synthetic_pipeline_and_joblib_round_trip(tmp_path) -> None:
     amazon = pd.DataFrame(
@@ -217,3 +201,107 @@ def test_synthetic_pipeline_and_joblib_round_trip(tmp_path) -> None:
     assert probabilities.shape == (len(candidates),)
     assert np.all((probabilities >= 0.0) & (probabilities <= 1.0))
     np.testing.assert_allclose(reloaded_probabilities, probabilities)
+
+
+def test_exact_duplicate_groups_do_not_cross_splits_and_flag_ambiguity() -> None:
+    google = pd.DataFrame(
+        [
+            _product("g_mapped", "Same Product", "Maker", 25.0),
+            _product("g_unmapped", "  same   product ", "maker", 25.0),
+            *[
+                _product(f"g_unique_{index}", f"Unique {index}", "Maker", 30.0 + index)
+                for index in range(18)
+            ],
+        ]
+    )
+    # Make the duplicate descriptions identical after whitespace normalization.
+    google.loc[google["product_id"].eq("g_unmapped"), "description"] = (
+        google.loc[google["product_id"].eq("g_mapped"), "description"].iloc[0].upper()
+    )
+    gold = pd.DataFrame(
+        [("g_mapped", "a_shared")], columns=["google_id", "amazon_id"]
+    )
+
+    assignments = make_entity_splits(
+        google, gold, seed=20260825, ratios=(0.70, 0.15, 0.15)
+    )
+    duplicate_rows = assignments.loc[
+        assignments["google_id"].isin(["g_mapped", "g_unmapped"])
+    ].set_index("google_id")
+
+    assert duplicate_rows["component_id"].nunique() == 1
+    assert duplicate_rows["duplicate_group_id"].nunique() == 1
+    assert duplicate_rows["split"].nunique() == 1
+    assert duplicate_rows["duplicate_group_size"].eq(2).all()
+    assert not bool(duplicate_rows.loc["g_mapped", "ambiguous_label"])
+    assert bool(duplicate_rows.loc["g_unmapped", "ambiguous_label"])
+    assert assignments.groupby("duplicate_group_id")["split"].nunique().max() == 1
+
+
+def test_threshold_support_is_required_independently_per_action() -> None:
+    unsupported_match = select_thresholds(
+        y_true=np.array([1, *([0] * 20)]),
+        scores=np.array([0.99, *([0.01] * 20)]),
+        no_match_correct=np.array([0, *([1] * 20)]),
+        min_auto_match_support=20,
+        min_auto_no_match_support=20,
+        warn=False,
+    )
+    assert unsupported_match["auto_match"]["feasible"] is False
+    assert unsupported_match["auto_match"]["enabled"] is False
+    assert unsupported_match["auto_match"]["threshold"] is None
+    assert unsupported_match["auto_no_match"]["enabled"] is True
+    assert unsupported_match["both_constraints_met"] is False
+
+    supported = select_thresholds(
+        y_true=np.array([*([1] * 20), *([0] * 20)]),
+        scores=np.array([*([0.99] * 20), *([0.01] * 20)]),
+        no_match_correct=np.array([*([0] * 20), *([1] * 20)]),
+        min_auto_match_support=20,
+        min_auto_no_match_support=20,
+        warn=False,
+    )
+    assert supported["auto_match"]["enabled"] is True
+    assert supported["auto_no_match"]["enabled"] is True
+    assert supported["both_constraints_met"] is True
+    assert supported["auto_match"]["support"] >= 20
+    assert supported["auto_no_match"]["support"] >= 20
+
+
+def test_listing_policy_uses_one_top_row_and_shared_tie_break() -> None:
+    candidates = pd.DataFrame(
+        [
+            ("g_tie", "a2", 0.9),
+            ("g_tie", "a1", 0.9),
+            ("g_retrieval", "a2", 0.7),
+            ("g_retrieval", "a3", 0.6),
+            ("g_rerank", "a2", 0.7),
+            ("g_rerank", "a3", 0.6),
+            ("g_no_match", "a2", 0.1),
+            ("g_no_match", "a3", 0.05),
+        ],
+        columns=["google_id", "amazon_id", "probability"],
+    )
+    gold = pd.DataFrame(
+        [("g_tie", "a1"), ("g_retrieval", "a9"), ("g_rerank", "a3")],
+        columns=["google_id", "amazon_id"],
+    )
+    policy = {
+        "auto_match": {"enabled": True, "threshold": 0.8},
+        "auto_no_match": {"enabled": True, "threshold": 0.2},
+    }
+    listings = build_listing_predictions(
+        candidates,
+        gold,
+        ["g_tie", "g_retrieval", "g_rerank", "g_no_match"],
+        policy,
+    ).set_index("google_id")
+
+    assert len(listings) == 4
+    assert listings.loc["g_tie", "amazon_id"] == "a1"
+    assert listings.loc["g_tie", "action"] == "auto_match"
+    assert listings.loc["g_retrieval", "ranking_outcome"] == "retrieval_miss"
+    assert listings.loc["g_rerank", "ranking_outcome"] == "reranking_miss"
+    assert listings.loc["g_no_match", "action"] == "auto_no_match"
+    assert bool(listings.loc["g_no_match", "action_correct"])
+    assert "action" not in candidates.columns

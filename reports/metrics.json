@@ -1,24 +1,31 @@
 {
-  "abstention": {
-    "accuracy_on_auto_decisions": 0.9681528662420382,
-    "auto_match_coverage": 0.006198347107438017,
-    "auto_match_precision": 0.6666666666666666,
-    "auto_reject_coverage": 0.3181818181818182,
-    "auto_reject_precision": 0.974025974025974,
-    "end_to_end_successful_match_rate": 0.010416666666666666,
-    "gold_retrieval_failure_count": 1,
-    "listing_count": 484,
-    "manual_review_rate": 0.6756198347107438,
-    "matched_listing_count": 192
-  },
   "dataset": {
     "amazon_records": 1363,
+    "ambiguous_unmapped_rows": 1,
+    "duplicate_groups": 3085,
+    "exact_duplicate_groups": 93,
+    "exact_duplicate_rows": 234,
     "gold_pairs": 1300,
-    "google_records": 3226,
-    "matched_google_records": 1291
+    "google_records": 3226
   },
-  "model": {
-    "class_weight": null,
+  "final_test": {
+    "status": "not_run",
+    "test_candidates_retrieved": false,
+    "test_examples_inspected": false,
+    "test_features_constructed": false,
+    "test_listings_encoded": false,
+    "test_metrics_computed": false,
+    "test_pairs_scored": false,
+    "test_sensitivity_computed": false
+  },
+  "model_selection": {
+    "ambiguous_validation_listings_excluded": 0,
+    "basis": [
+      "validation_overall_hit_at_1",
+      "validation_mrr",
+      "feature_count",
+      "declared_order"
+    ],
     "feature_columns": [
       "lexical_similarity",
       "dense_similarity",
@@ -36,72 +43,249 @@
       "query_price_missing",
       "candidate_price_missing"
     ],
-    "selected": "hybrid_logistic",
-    "sentence_encoder": "sentence-transformers/all-MiniLM-L6-v2",
-    "validation_constraints_met": true,
-    "validation_warning": null
-  },
-  "pair_matching": {
-    "brier_score": 0.007416486329646635,
-    "f1": 0.5316455696202531,
-    "pr_auc": 0.5426416439495428,
-    "precision": 0.6774193548387096,
-    "recall": 0.4375,
-    "roc_auc": 0.9876903261145686
-  },
-  "retrieval": {
-    "dense_recall_at_10": 0.9427083333333334,
-    "dense_recall_at_20": 0.9635416666666666,
-    "dense_recall_at_5": 0.875,
-    "latency_definition": "Warm per-listing query text transforms, dense encoding, and both exact searches; excludes model load and catalog precomputation.",
-    "lexical_recall_at_10": 0.9375,
-    "lexical_recall_at_20": 0.9739583333333334,
-    "lexical_recall_at_5": 0.8802083333333334,
-    "listing_count": 484,
-    "mean_candidate_count": 32.929752066115704,
-    "mean_latency_ms": 13.942721159359024,
-    "p95_latency_ms": 15.162512706592677,
-    "recall_at_10": 0.9739583333333334,
-    "recall_at_20": 0.9947916666666666,
-    "recall_at_5": 0.953125,
-    "retrieval_latency_seconds": 6.748277041129768,
-    "union_recall_at_10": 0.9739583333333334,
-    "union_recall_at_20": 0.9947916666666666,
-    "union_recall_at_5": 0.953125
+    "selected": "hybrid_logistic"
   },
   "run": {
+    "model_seed": 42,
     "recall_ks": [
       5,
       10,
       20
     ],
-    "seed": 42,
+    "rrf_constant": 60.0,
     "split_ratios": [
       0.7,
       0.15,
       0.15
     ],
+    "split_seed": 20260825,
     "top_k": 20
   },
   "splits": {
     "test": {
-      "gold_pairs": 193,
-      "google_records": 484,
-      "matched_google_records": 192
+      "evaluation_status": "not_run",
+      "google_records": 484
     },
     "train": {
-      "gold_pairs": 912,
-      "google_records": 2258,
-      "matched_google_records": 904
+      "gold_pairs": 911,
+      "google_records": 2258
     },
     "validation": {
-      "gold_pairs": 195,
-      "google_records": 484,
-      "matched_google_records": 195
+      "gold_pairs": 192,
+      "google_records": 484
     }
   },
-  "thresholds": {
-    "match_threshold": 0.97,
-    "reject_threshold": 0.01
+  "stage": "develop",
+  "training": {
+    "ambiguous_negative_listings_excluded": 1,
+    "gold_injected_listings": 13,
+    "gold_injected_positive_rows": 13
+  },
+  "validation": {
+    "calibration": {
+      "pair_level": {
+        "brier_score": 0.010343215545738865,
+        "count": 9680,
+        "mean_score": 0.01826280293228722,
+        "observed_match_rate": 0.019731404958677687,
+        "positive_count": 191
+      },
+      "top_candidate": {
+        "brier_score": 0.1453037678712136,
+        "count": 484,
+        "mean_score": 0.23209777256447645,
+        "observed_match_rate": 0.3409090909090909,
+        "positive_count": 165
+      }
+    },
+    "common_rrf_pool_score_ranking_diagnostics": {
+      "definition": "Score-only reranking diagnostics over the shared fixed-budget RRF candidate set; these are not standalone channel retrieval results.",
+      "dense_score": {
+        "conditional_hit_at_1": 0.6772486772486772,
+        "gold_listing_count": 190,
+        "gold_retrieved_count": 189,
+        "hit_at_1_count": 128,
+        "mrr": 0.790176309758353,
+        "overall_hit_at_1": 0.6736842105263158,
+        "reranking_miss_count": 61,
+        "retrieval_miss_count": 1
+      },
+      "lexical_score": {
+        "conditional_hit_at_1": 0.6507936507936508,
+        "gold_listing_count": 190,
+        "gold_retrieved_count": 189,
+        "hit_at_1_count": 123,
+        "mrr": 0.7637116533006219,
+        "overall_hit_at_1": 0.6473684210526316,
+        "reranking_miss_count": 66,
+        "retrieval_miss_count": 1
+      },
+      "rrf_score": {
+        "conditional_hit_at_1": 0.6878306878306878,
+        "gold_listing_count": 190,
+        "gold_retrieved_count": 189,
+        "hit_at_1_count": 130,
+        "mrr": 0.7963196452670137,
+        "overall_hit_at_1": 0.6842105263157895,
+        "reranking_miss_count": 59,
+        "retrieval_miss_count": 1
+      }
+    },
+    "exact_title_ambiguity_sensitivity": {
+      "definition": "Officially unmapped listings with an exact normalized-title Amazon collision are excluded, not relabelled.",
+      "excluded_listing_count": 6,
+      "listing_policy": {
+        "accuracy_on_automatic_decisions": 0.9515418502202643,
+        "assumed_no_match_listing_count": 288,
+        "assumed_no_match_review_count": 72,
+        "assumed_no_match_review_rate": 0.25,
+        "auto_match": {
+          "correct_count": 0,
+          "empirical_precision": null,
+          "error_count": 0,
+          "listing_coverage": 0.0,
+          "support": 0,
+          "wilson_95_high": null,
+          "wilson_95_low": null
+        },
+        "auto_no_match": {
+          "correct_count": 216,
+          "empirical_precision": 0.9515418502202643,
+          "error_count": 11,
+          "listing_coverage": 0.47489539748953974,
+          "support": 227,
+          "wilson_95_high": 0.9727293218861068,
+          "wilson_95_low": 0.9153260605711384
+        },
+        "automatic_coverage": 0.47489539748953974,
+        "end_to_end_auto_match_rate": 0.0,
+        "listing_count": 478,
+        "manual_review_count": 251,
+        "manual_review_rate": 0.5251046025104602,
+        "matched_listing_count": 190,
+        "matched_review_count": 179,
+        "matched_review_rate": 0.9421052631578948
+      },
+      "no_match_detection": {
+        "assumption": "Official mapping absence is treated as no-match.",
+        "average_precision": 0.9542373911385335,
+        "count": 478,
+        "positive_count": 288,
+        "precision_at_policy": 0.9515418502202643,
+        "recall_at_policy": 0.75
+      }
+    },
+    "listing_policy": {
+      "accuracy_on_automatic_decisions": 0.9515418502202643,
+      "assumed_no_match_listing_count": 294,
+      "assumed_no_match_review_count": 78,
+      "assumed_no_match_review_rate": 0.2653061224489796,
+      "auto_match": {
+        "correct_count": 0,
+        "empirical_precision": null,
+        "error_count": 0,
+        "listing_coverage": 0.0,
+        "support": 0,
+        "wilson_95_high": null,
+        "wilson_95_low": null
+      },
+      "auto_no_match": {
+        "correct_count": 216,
+        "empirical_precision": 0.9515418502202643,
+        "error_count": 11,
+        "listing_coverage": 0.4690082644628099,
+        "support": 227,
+        "wilson_95_high": 0.9727293218861068,
+        "wilson_95_low": 0.9153260605711384
+      },
+      "automatic_coverage": 0.4690082644628099,
+      "end_to_end_auto_match_rate": 0.0,
+      "listing_count": 484,
+      "manual_review_count": 257,
+      "manual_review_rate": 0.53099173553719,
+      "matched_listing_count": 190,
+      "matched_review_count": 179,
+      "matched_review_rate": 0.9421052631578948
+    },
+    "no_match_detection": {
+      "assumption": "Official mapping absence is treated as no-match.",
+      "average_precision": 0.9483137308409746,
+      "count": 484,
+      "positive_count": 294,
+      "precision_at_policy": 0.9515418502202643,
+      "recall_at_policy": 0.7346938775510204
+    },
+    "pair_matching": {
+      "brier_score": 0.010343215545738865,
+      "count": 9680,
+      "f1_at_0_5": 0.5923566878980892,
+      "positive_count": 191,
+      "pr_auc": 0.6441419341771109,
+      "precision_at_0_5": 0.7560975609756098,
+      "recall_at_0_5": 0.4869109947643979,
+      "roc_auc": 0.9855721615383809
+    },
+    "policy_selection": {
+      "auto_match": {
+        "correct_count": 0,
+        "coverage": 0.0,
+        "empirical_precision": null,
+        "enabled": false,
+        "error_count": 0,
+        "feasible": false,
+        "precision_wilson_95_high": null,
+        "precision_wilson_95_low": null,
+        "support": 0,
+        "threshold": null
+      },
+      "auto_no_match": {
+        "correct_count": 216,
+        "coverage": 0.4690082644628099,
+        "empirical_precision": 0.9515418502202643,
+        "enabled": true,
+        "error_count": 11,
+        "feasible": true,
+        "precision_wilson_95_high": 0.9727293218861068,
+        "precision_wilson_95_low": 0.9153260605711384,
+        "support": 227,
+        "threshold": 0.03
+      },
+      "both_constraints_met": false,
+      "selection_mode": "auto_no_match_only",
+      "warning": "Both automatic actions could not be enabled together while meeting their precision and support requirements. Only auto_no_match is enabled; all other listings require manual review."
+    },
+    "retrieval": {
+      "candidate_budget": 20,
+      "dense_recall_at_10": 0.9631578947368421,
+      "dense_recall_at_20": 0.9947368421052631,
+      "dense_recall_at_5": 0.9421052631578948,
+      "latency_scope": "Query dense encoding plus exact lexical/dense retrieval and RRF; catalog precomputation and model loading excluded.",
+      "lexical_recall_at_10": 0.9473684210526315,
+      "lexical_recall_at_20": 0.968421052631579,
+      "lexical_recall_at_5": 0.9157894736842105,
+      "listing_count": 484,
+      "mean_latency_ms": 2.6077724693050564,
+      "mean_primary_candidate_count": 20.0,
+      "primary_retriever": "fixed_budget_rrf",
+      "retrieval_latency_seconds": 1.2621618751436472,
+      "rrf_constant": 60.0,
+      "rrf_recall_at_10": 0.9736842105263158,
+      "rrf_recall_at_20": 0.9947368421052631,
+      "rrf_recall_at_5": 0.9473684210526315,
+      "union_per_channel_definition": "Diagnostic only: lexical top-K union dense top-K, up to 2K rows.",
+      "union_per_channel_recall_at_10": 0.9894736842105263,
+      "union_per_channel_recall_at_20": 1.0,
+      "union_per_channel_recall_at_5": 0.9842105263157894
+    },
+    "selected_matcher_ranking": {
+      "conditional_hit_at_1": 0.873015873015873,
+      "gold_listing_count": 190,
+      "gold_retrieved_count": 189,
+      "hit_at_1_count": 165,
+      "mrr": 0.9254385964912282,
+      "overall_hit_at_1": 0.868421052631579,
+      "reranking_miss_count": 24,
+      "retrieval_miss_count": 1
+    }
   }
 }
