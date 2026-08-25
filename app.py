@@ -14,7 +14,7 @@ from scipy import sparse
 
 from src.features import build_pair_features
 from src.model import predict_probabilities, select_top_candidates
-from src.policy import apply_policy
+from src.policy import AUTO_NO_MATCH, apply_policy
 from src.retrieval import encode_products, load_sentence_encoder, retrieve_candidates
 
 
@@ -96,12 +96,12 @@ def main() -> None:
         if no_match_threshold is not None
         else "not active"
     )
-    st.markdown("**Frozen validation policy**")
+    st.markdown("**Validation-selected policy**")
     st.write(
         f"`auto_match`: **{auto_match_status}**  \n"
         f"`auto_no_match`: **{auto_no_match_status}**  \n"
         f"Active no-match threshold: **{threshold_text}**  \n"
-        "All other pair match scores go to **manual review**."
+        "All other top-candidate scores result in **manual review**."
     )
 
     with st.form("listing_form"):
@@ -179,8 +179,13 @@ def main() -> None:
         ),
     )
     st.subheader(f"Decision: {decision}")
+    candidate_label = (
+        "Top retrieved candidate—not accepted as a match"
+        if decision == AUTO_NO_MATCH
+        else "Best candidate"
+    )
     st.write(
-        f"Best candidate: **{best['title']}**  \n"
+        f"{candidate_label}: **{best['title']}**  \n"
         f"Pair match score: **{best['probability']:.3f}**"
     )
     results = results.sort_values(

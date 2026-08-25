@@ -12,22 +12,54 @@ Streamlit app is a local portfolio demo, not a hardened public service. The
 project does not add an API, database, model registry, approximate index,
 deployment stack, or broader model family.
 
-## Development checkpoint
+## Corrected-resplit results
 
-The duplicate-aware correction pass has completed its development stage only.
-All values below are training/validation results from `split_seed: 20260825`
-and `model_seed: 42`. The corrected-resplit assignments are frozen, but during
-this development run no reserved evaluation listing was encoded, retrieved,
-featured, scored, evaluated, or inspected. The predeclared corrected resplit
-evaluation remains unrun pending separate approval.
+The completed corrected-resplit bundle evaluates the frozen hybrid matcher and
+validation-selected policy on 484 listings. These corrected metrics are the
+headline output; the corrected resplit was not used to select the model or its
+thresholds.
 
-> Because this benchmark was previously evaluated under seed 42 before the leakage issue was discovered, the reserved evaluation is a predeclared corrected resplit, not a historically untouched holdout. Validation results are tuning-set evidence, and the corrected-resplit result is a transparent secondary confirmation rather than pristine independent evidence.
+| Metric | Corrected result |
+|---|---:|
+| RRF Recall@20 | 0.9592 — 188/196 |
+| Hybrid Hit@1 | 0.8469 — 166/196 |
+| RRF-score baseline Hit@1 | 0.6378 |
+| Hit@1 improvement | +20.9 percentage points |
+| Hybrid MRR | 0.8975 |
+| RRF-score baseline MRR | 0.7512 |
+| Group auto-no-match precision | 0.9760 — 163/167 |
+| Group coverage | 0.3561 |
+| Group Wilson 95% interval | [0.9400, 0.9906] |
+| Listing auto-no-match precision | 0.9770 — 170/174 |
+| Manual review | 310/484 |
+| Auto-match | Disabled |
+
+> Because this benchmark was evaluated under seed 42 before the leakage issue was discovered, this is a predeclared corrected resplit, not a historically untouched external holdout. Validation results remain model- and threshold-selection evidence, while the corrected-resplit result is a transparent secondary confirmation.
 
 Previously published pre-correction results are development diagnostics only.
 Repartitioning does not erase that history or restore historical independence.
 
-The authoritative machine-readable development output is
-[`reports/metrics.json`](reports/metrics.json).
+The authoritative machine-readable corrected output is
+[`reports/corrected_resplit/metrics.json`](reports/corrected_resplit/metrics.json).
+
+### Failure analysis
+
+Among 196 gold-bearing listings, there were 8 retrieval misses and 22
+reranking misses. All 22 reranking misses and 7 of the 8 retrieval misses went
+to manual review. The remaining retrieval miss was one of only four erroneous
+automatic no-match decisions.
+
+Of those four automatic no-match errors, three had a gold product retrieved
+and ranked first but received a very low pair match score; one was a retrieval
+miss. Inspection points to SKU-heavy abbreviations, missing metadata, and
+fine-grained version, platform, licence, upgrade, and bundle distinctions as
+the main difficulties. Several apparent pair false positives are nearly
+identical products and may reflect incomplete benchmark mappings rather than
+genuine business errors.
+
+The committed [`error_examples.csv`](reports/corrected_resplit/error_examples.csv)
+is capped at 10 illustrative examples per error type. It is useful for case
+inspection but is not a representative sample of the evaluation errors.
 
 ## Dataset, split, and label assumptions
 
@@ -101,7 +133,7 @@ error analysis, corrected-evaluation code, and Streamlit.
   multiple gold partners, the highest-ranked gold partner is used; retrieval
   misses contribute zero.
 
-## Validation results
+## Validation results: model and threshold selection
 
 ### Fixed-budget retrieval
 
@@ -197,17 +229,26 @@ automatic decision.
 
 `both_constraints_met` is false because no auto-match threshold met both the
 precision and support requirements. The policy therefore enables only
-`auto_no_match`; all other score regions become `manual_review`. Overall, 274
-of 484 listings are reviewed. Review rates are 182/190 (0.9579) for mapped
-listings and 92/294 (0.3129) for assumed-no-match listings.
+`auto_no_match`; all other top-candidate scores result in `manual_review`.
+Overall, 274 of 484 listings are reviewed. Review rates are 182/190 (0.9579)
+for mapped listings and 92/294 (0.3129) for assumed-no-match listings.
 
 The compact threshold diagnostic is
 [`reports/validation_precision_coverage.csv`](reports/validation_precision_coverage.csv).
 
 ## Reports and artifacts
 
-- [`reports/metrics.json`](reports/metrics.json): complete development metrics
-  and explicit corrected-resplit access flags.
+- [`reports/corrected_resplit/metrics.json`](reports/corrected_resplit/metrics.json):
+  complete corrected-resplit retrieval, ranking, calibration, and listing-policy
+  metrics.
+- [`reports/corrected_resplit/listing_predictions.csv`](reports/corrected_resplit/listing_predictions.csv):
+  one authoritative top-candidate/action row per corrected-resplit listing.
+- [`reports/corrected_resplit/error_examples.csv`](reports/corrected_resplit/error_examples.csv):
+  capped illustrative failure cases and pair-score diagnostics.
+- `reports/corrected_resplit/corrected_resplit_*.png`: corrected-resplit
+  retrieval, pair PR, pair reliability, and top-candidate reliability plots.
+- [`reports/metrics.json`](reports/metrics.json): complete development and
+  validation metrics plus the frozen policy metadata.
 - [`reports/model_comparison.csv`](reports/model_comparison.csv): the four
   validation model variants and selection result.
 - [`reports/validation_listing_predictions.csv`](reports/validation_listing_predictions.csv):
@@ -220,9 +261,9 @@ The compact threshold diagnostic is
 - `reports/validation_*.png`: fixed-budget retrieval, pair PR, pair-level
   reliability, and top-candidate reliability plots.
 - `artifacts/`: frozen vectorizer, catalog matrices, matcher, split assignment,
-  policy, and development snapshot for the separately authorized corrected
-  evaluation and Streamlit demo. The snapshot records the encoder revision and
-  SHA-256 digest of each official raw CSV.
+  validation-selected policy, and development snapshot used to verify the
+  corrected evaluation inputs and support the Streamlit demo. The snapshot
+  records the encoder revision and SHA-256 digest of each official raw CSV.
 
 The frozen input metadata records these exact development inputs:
 
@@ -234,20 +275,20 @@ The frozen input metadata records these exact development inputs:
 | `GoogleProducts.csv` | `18fbec453670e40e0969fdaffe71e92ba62a24c49b0c8341fe4621e70e402e3f` |
 | `Amzon_GoogleProducts_perfectMapping.csv` | `885eda7da34ed00809975d34452800e7fbde9ef0540fb60474a18dca15fa4fe7` |
 
-The future corrected evaluation is additive and writes only to its own bundle:
+The completed corrected evaluation is additive and is stored in its own bundle:
 
 - `reports/corrected_resplit/metrics.json`
 - `reports/corrected_resplit/listing_predictions.csv`
 - `reports/corrected_resplit/error_examples.csv`
 - `reports/corrected_resplit/corrected_resplit_*.png`
 
-It does not rewrite development metrics, model comparison, threshold evidence,
-validation predictions, validation errors, or validation plots. Before writing,
-the stage checks the frozen artifacts, raw inputs, assignments, and development
+It did not rewrite development metrics, model comparison, threshold evidence,
+validation predictions, validation errors, or validation plots. The evaluation
+stage checks the frozen artifacts, raw inputs, assignments, and development
 reports. Assignment checks cover the canonical digest and counts, exact
 seed-defined membership, Google-ID equality, allowed labels, and component and
-exact-duplicate-group isolation. It refuses to overwrite an existing
-corrected-resplit bundle. A deliberate rerun must use a different output
+exact-duplicate-group isolation. It refuses to overwrite the committed
+corrected-resplit bundle; a deliberate rerun must use a different output
 directory.
 
 ## Install and run
@@ -264,17 +305,10 @@ streamlit run app.py
 ```
 
 The first development run needs network access only if the benchmark or pinned
-sentence encoder revision is not already cached. The project also implements
-the predeclared corrected resplit command:
-
-```bash
-python run_pipeline.py --stage corrected-eval
-```
-
-Do not invoke that command until the development implementation and validation
-outputs have received explicit approval. Corrected evaluation loads the pinned
-encoder revision offline and writes only the separate bundle above. To make a
-deliberate rerun without overwriting that bundle, specify another directory:
+sentence encoder revision is not already cached. The corrected-resplit bundle
+is already committed, and the evaluation command refuses to overwrite it.
+To reproduce the evaluation into a separate directory, specify another output
+path:
 
 ```bash
 python run_pipeline.py --stage corrected-eval --output-dir reports/corrected_resplit_rerun
