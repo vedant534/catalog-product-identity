@@ -9,6 +9,7 @@ reports_dir: reports
 model_cache_dir: .cache/huggingface
 
 sentence_model: sentence-transformers/all-MiniLM-L6-v2
+sentence_model_revision: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
 dense_batch_size: 64
 top_k: 20
 rrf_constant: 60

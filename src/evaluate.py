@@ -53,6 +53,8 @@ def compute_retrieval_metrics(
     ks: Sequence[int] = (5, 10, 20),
     all_listing_ids: Iterable[str] | None = None,
     latency_seconds: float | Sequence[float] | None = None,
+    *,
+    per_channel_candidate_depth: int | None = None,
 ) -> dict[str, float | int | str]:
     """Compare lexical, dense, fixed-budget RRF, and per-channel union recall."""
     required = {"google_id", "amazon_id"}
@@ -62,6 +64,30 @@ def compute_retrieval_metrics(
         raise ValueError(f"diagnostic_pool must contain {sorted(required)}")
     if not required.issubset(gold_pairs.columns):
         raise ValueError(f"gold_pairs must contain {sorted(required)}")
+
+    if per_channel_candidate_depth is None:
+        raise ValueError("per_channel_candidate_depth is required")
+    if isinstance(per_channel_candidate_depth, (bool, np.bool_)):
+        raise ValueError("per_channel_candidate_depth must be a positive integer")
+    candidate_depth = int(per_channel_candidate_depth)
+    if candidate_depth != per_channel_candidate_depth or candidate_depth <= 0:
+        raise ValueError("per_channel_candidate_depth must be a positive integer")
+    requested_ks: list[int] = []
+    for value in ks:
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError("retrieval K values must be positive integers")
+        k = int(value)
+        if k != value:
+            raise ValueError("retrieval K values must be positive integers")
+        requested_ks.append(k)
+    if any(k <= 0 for k in requested_ks):
+        raise ValueError("retrieval K values must be positive")
+    too_deep = [k for k in requested_ks if k > candidate_depth]
+    if too_deep:
+        raise ValueError(
+            "Requested retrieval Recall@K exceeds the generated per-channel "
+            f"candidate depth {candidate_depth}: {too_deep}"
+        )
 
     primary = candidates.copy()
     pool = diagnostic_pool.copy()
@@ -76,9 +102,7 @@ def compute_retrieval_metrics(
     gold = gold_pairs[["google_id", "amazon_id"]].astype(str).drop_duplicates()
     gold_by_listing = gold.groupby("google_id")["amazon_id"].agg(set).to_dict()
     metrics: dict[str, float | int | str] = {}
-    for k in ks:
-        if k <= 0:
-            raise ValueError("retrieval K values must be positive")
+    for k in requested_ks:
         lexical = pd.to_numeric(pool["lexical_rank"], errors="coerce").le(k)
         dense = pd.to_numeric(pool["dense_rank"], errors="coerce").le(k)
         rrf = pd.to_numeric(primary["rrf_rank"], errors="coerce").le(k)
@@ -111,7 +135,9 @@ def compute_retrieval_metrics(
                 if latency.size == 1 and listing_ids
                 else float(latency.mean())
             )
-            metrics["mean_latency_ms"] = mean_seconds * 1000.0
+            metrics["amortized_batch_retrieval_ms_per_listing"] = (
+                mean_seconds * 1000.0
+            )
             if latency.size > 1:
                 metrics["p95_latency_ms"] = float(np.percentile(latency, 95) * 1000.0)
         metrics["latency_scope"] = (
@@ -131,17 +157,21 @@ def compute_pair_metrics(
     probability = np.asarray(probabilities, dtype=float).reshape(-1)
     if y.shape != probability.shape or y.size == 0:
         raise ValueError("y_true and probabilities must be non-empty aligned arrays")
-    predicted = probability >= classification_threshold
+    threshold = float(classification_threshold)
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("classification_threshold must be finite and lie in [0, 1]")
+    predicted = probability >= threshold
     return {
         "count": int(y.size),
         "positive_count": int(y.sum()),
+        "classification_threshold": threshold,
         "pr_auc": float(average_precision_score(y, probability)),
         "roc_auc": (
             float(roc_auc_score(y, probability)) if np.unique(y).size == 2 else 0.0
         ),
-        "precision_at_0_5": float(precision_score(y, predicted, zero_division=0)),
-        "recall_at_0_5": float(recall_score(y, predicted, zero_division=0)),
-        "f1_at_0_5": float(f1_score(y, predicted, zero_division=0)),
+        "precision": float(precision_score(y, predicted, zero_division=0)),
+        "recall": float(recall_score(y, predicted, zero_division=0)),
+        "f1": float(f1_score(y, predicted, zero_division=0)),
         "brier_score": float(brier_score_loss(y, probability)),
     }
 
@@ -305,12 +335,17 @@ def compute_no_match_metrics(listing_predictions: pd.DataFrame) -> dict[str, Any
     labels = (~listing_predictions["has_gold_listing"].astype(bool)).astype(int)
     scores = 1.0 - listing_predictions["probability"].to_numpy(dtype=float)
     predicted = listing_predictions["action"].eq(AUTO_NO_MATCH).to_numpy()
+    policy_support = int(predicted.sum())
     return {
         "assumption": "Official mapping absence is treated as no-match.",
         "count": int(len(labels)),
         "positive_count": int(labels.sum()),
         "average_precision": float(average_precision_score(labels, scores)),
-        "precision_at_policy": float(precision_score(labels, predicted, zero_division=0)),
+        "precision_at_policy": (
+            float(precision_score(labels, predicted, zero_division=0))
+            if policy_support
+            else None
+        ),
         "recall_at_policy": float(recall_score(labels, predicted, zero_division=0)),
     }
 
@@ -571,7 +606,7 @@ def save_stage_reports(
     top_probabilities: Sequence[float],
     retrieval_metrics: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Write one validation or final-test report bundle."""
+    """Write the validation-only development report bundle."""
     output = Path(reports_dir)
     output.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -597,6 +632,48 @@ def save_stage_reports(
         retrieval_metrics,
         output,
         split_label,
+    )
+    return {**paths, "plots": plot_paths}
+
+
+def save_corrected_resplit_reports(
+    output_dir: str | Path,
+    metrics: Mapping[str, Any],
+    listing_predictions: pd.DataFrame,
+    error_examples: pd.DataFrame,
+    pair_y_true: Sequence[int],
+    pair_probabilities: Sequence[float],
+    top_y_true: Sequence[int],
+    top_probabilities: Sequence[float],
+    retrieval_metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Write an additive corrected-resplit bundle in a fresh directory."""
+    output = Path(output_dir)
+    if output.exists():
+        raise FileExistsError(
+            f"Corrected-resplit output already exists: {output}. "
+            "Choose a separate --output-dir for a deliberate rerun."
+        )
+    output.mkdir(parents=True, exist_ok=False)
+    paths = {
+        "metrics": output / "metrics.json",
+        "listing_predictions": output / "listing_predictions.csv",
+        "error_examples": output / "error_examples.csv",
+    }
+    paths["metrics"].write_text(
+        json.dumps(_json_ready(metrics), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    listing_predictions.to_csv(paths["listing_predictions"], index=False)
+    error_examples.to_csv(paths["error_examples"], index=False)
+    plot_paths = save_evaluation_plots(
+        pair_y_true,
+        pair_probabilities,
+        top_y_true,
+        top_probabilities,
+        retrieval_metrics,
+        output,
+        "corrected_resplit",
     )
     return {**paths, "plots": plot_paths}
 

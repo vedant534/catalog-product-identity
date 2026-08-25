@@ -60,6 +60,25 @@ def _locate_dataset_files(raw_dir: Path) -> dict[str, Path]:
     return found
 
 
+def official_raw_csv_sha256(raw_dir: str | Path) -> dict[str, str]:
+    """Return SHA-256 digests for the three official benchmark CSV files."""
+    raw_path = Path(raw_dir)
+    paths = _locate_dataset_files(raw_path)
+    missing = set(DATASET_FILES) - set(paths)
+    if missing:
+        names = ", ".join(DATASET_FILES[key] for key in sorted(missing))
+        raise FileNotFoundError(f"Missing dataset file(s): {names}")
+
+    digests: dict[str, str] = {}
+    for key, official_name in DATASET_FILES.items():
+        digest = hashlib.sha256()
+        with paths[key].open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digests[official_name] = digest.hexdigest()
+    return digests
+
+
 def _archive_members(archive: zipfile.ZipFile) -> dict[str, str]:
     members: dict[str, str] = {}
     for member in archive.namelist():
@@ -406,11 +425,53 @@ def make_entity_splits(
     )
 
 
+def validate_assignment_ids(
+    google: pd.DataFrame,
+    assignments: pd.DataFrame,
+) -> None:
+    """Require one split assignment for every normalized Google product ID."""
+    if "product_id" not in google:
+        raise ValueError("Google records must contain product_id")
+    if "google_id" not in assignments:
+        raise ValueError("Split assignments must contain google_id")
+
+    google_ids = _clean_ids(google["product_id"])
+    assignment_text = assignments["google_id"].astype("string").fillna("")
+    assignment_ids = _clean_ids(assignments["google_id"])
+    if google_ids.eq("").any():
+        raise ValueError("Normalized Google product IDs must be non-empty")
+    if assignment_ids.eq("").any():
+        raise ValueError("Split assignment IDs must be non-empty")
+    if not assignment_text.equals(assignment_ids):
+        raise ValueError("Split assignment IDs must already be normalized")
+    if google_ids.duplicated().any():
+        raise ValueError("Normalized Google product IDs must be unique")
+    if assignment_ids.duplicated().any():
+        raise ValueError("Split assignment IDs must be unique")
+
+    google_id_set = set(google_ids)
+    assignment_id_set = set(assignment_ids)
+    missing = sorted(google_id_set - assignment_id_set)
+    extra = sorted(assignment_id_set - google_id_set)
+    if missing or extra:
+        details = []
+        if missing:
+            details.append(f"missing={len(missing)}")
+        if extra:
+            details.append(f"extra={len(extra)}")
+        raise ValueError(
+            "Split assignment IDs must exactly equal normalized Google IDs ("
+            + ", ".join(details)
+            + ")"
+        )
+
+
 def split_google_listings(
     google: pd.DataFrame,
     assignments: pd.DataFrame,
 ) -> dict[str, pd.DataFrame]:
     """Materialize train/validation/test Google frames from split assignments."""
+    validate_assignment_ids(google, assignments)
     merged = google.merge(
         assignments[["google_id", "split"]],
         left_on="product_id",

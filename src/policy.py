@@ -225,9 +225,72 @@ def _validate_minimum_support(value: int, name: str) -> int:
     return minimum
 
 
+def _validated_duplicate_group_ids(
+    duplicate_group_ids: Sequence[str] | np.ndarray | None,
+    size: int,
+) -> np.ndarray:
+    """Return aligned group IDs, defaulting to one evidence unit per row."""
+    if duplicate_group_ids is None:
+        return np.arange(size, dtype=int)
+
+    raw_ids = np.asarray(duplicate_group_ids, dtype=object).reshape(-1)
+    if raw_ids.size != size:
+        raise ValueError("duplicate_group_ids must align with labels and scores.")
+    normalized: list[str] = []
+    for value in raw_ids:
+        if value is None or (
+            isinstance(value, (float, np.floating)) and np.isnan(value)
+        ):
+            raise ValueError("duplicate_group_ids must not contain missing values.")
+        group_id = str(value).strip()
+        if not group_id:
+            raise ValueError("duplicate_group_ids must not contain empty values.")
+        normalized.append(group_id)
+    return np.asarray(normalized, dtype=object)
+
+
+def _duplicate_group_index(group_ids: np.ndarray) -> tuple[np.ndarray, int]:
+    """Encode stable group IDs as zero-based positions."""
+    positions: dict[object, int] = {}
+    inverse = np.empty(group_ids.size, dtype=int)
+    for row_index, group_id in enumerate(group_ids):
+        if group_id not in positions:
+            positions[group_id] = len(positions)
+        inverse[row_index] = positions[group_id]
+    return inverse, len(positions)
+
+
+def _group_action_statistics(
+    listing_selected: np.ndarray,
+    listing_correct: np.ndarray,
+    group_inverse: np.ndarray,
+    group_count: int,
+) -> dict[str, float | int | None]:
+    """Count each selected duplicate group once with logical-all correctness."""
+    group_selected = np.zeros(group_count, dtype=bool)
+    np.logical_or.at(group_selected, group_inverse, listing_selected.astype(bool))
+
+    # A selected group is correct only when every listing in the complete group
+    # has a correct action label. This keeps inconsistent duplicate labels from
+    # contributing optimistic evidence even if only one member crosses a grid
+    # boundary.
+    group_correct = np.ones(group_count, dtype=bool)
+    np.logical_and.at(group_correct, group_inverse, listing_correct.astype(bool))
+    return _action_statistics(group_selected, group_correct, group_count)
+
+
+def _prefixed_statistics(
+    prefix: str,
+    statistics: dict[str, float | int | None],
+) -> dict[str, float | int | None]:
+    return {f"{prefix}_{key}": value for key, value in statistics.items()}
+
+
 def _threshold_diagnostics(
     scores: np.ndarray,
     correct_labels: np.ndarray,
+    group_inverse: np.ndarray,
+    group_count: int,
     thresholds: np.ndarray,
     *,
     action: str,
@@ -235,15 +298,20 @@ def _threshold_diagnostics(
     min_support: int,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    total = scores.size
     for threshold_value in thresholds:
         threshold = float(threshold_value)
         selected = (
             scores <= threshold if action == AUTO_NO_MATCH else scores >= threshold
         )
-        statistics = _action_statistics(selected, correct_labels, total)
-        precision = statistics["empirical_precision"]
-        support_met = statistics["support"] >= min_support
+        listing_statistics = _action_statistics(selected, correct_labels, scores.size)
+        group_statistics = _group_action_statistics(
+            selected,
+            correct_labels,
+            group_inverse,
+            group_count,
+        )
+        precision = group_statistics["empirical_precision"]
+        support_met = group_statistics["support"] >= min_support
         precision_target_met = (
             precision is not None and precision >= precision_target
         )
@@ -251,9 +319,10 @@ def _threshold_diagnostics(
             {
                 "action": action,
                 "threshold": threshold,
-                **statistics,
+                **_prefixed_statistics("group", group_statistics),
+                **_prefixed_statistics("listing", listing_statistics),
                 "precision_target": precision_target,
-                "min_support": min_support,
+                "min_group_support": min_support,
                 "support_met": support_met,
                 "precision_target_met": precision_target_met,
                 "feasible": support_met and precision_target_met,
@@ -269,7 +338,7 @@ def _compatible_pair_key(
     """Prefer coverage, then lower no-match and higher match boundaries."""
     no_match, match = pair
     return (
-        float(no_match["coverage"]) + float(match["coverage"]),
+        float(no_match["group_coverage"]) + float(match["group_coverage"]),
         -float(no_match["threshold"]),
         float(match["threshold"]),
     )
@@ -282,29 +351,66 @@ def _standalone_key(row: dict[str, Any]) -> tuple[float, float, int, float]:
     action_priority = 1 if action == AUTO_NO_MATCH else 0
     conservative_threshold = -threshold if action == AUTO_NO_MATCH else threshold
     return (
-        float(row["coverage"]),
-        float(row["empirical_precision"]),
+        float(row["group_coverage"]),
+        float(row["group_empirical_precision"]),
         action_priority,
         conservative_threshold,
     )
 
 
+_STATISTIC_KEYS = (
+    "support",
+    "correct_count",
+    "error_count",
+    "empirical_precision",
+    "precision_wilson_95_low",
+    "precision_wilson_95_high",
+    "coverage",
+)
+
+
+def _statistics_from_diagnostic(
+    row: dict[str, Any] | None,
+    prefix: str,
+    total: int,
+) -> dict[str, float | int | None]:
+    if row is None:
+        return _action_statistics(
+            np.zeros(total, dtype=bool),
+            np.zeros(total, dtype=bool),
+            total,
+        )
+    return {key: row[f"{prefix}_{key}"] for key in _STATISTIC_KEYS}
+
+
+def _operational_statistics(operational: dict[str, Any]) -> dict[str, Any]:
+    return {key: operational[key] for key in _STATISTIC_KEYS}
+
+
 def _selected_action_result(
     operational: dict[str, Any],
+    selected_row: dict[str, Any] | None,
     *,
     feasible: bool,
+    group_count: int,
 ) -> dict[str, Any]:
+    group_evidence = _statistics_from_diagnostic(
+        selected_row,
+        "group",
+        group_count,
+    )
+    listing_operation = _operational_statistics(operational)
     return {
         "feasible": feasible,
         "enabled": bool(operational["enabled"]),
         "threshold": operational["threshold"],
-        "support": int(operational["support"]),
-        "correct_count": int(operational["correct_count"]),
-        "error_count": int(operational["error_count"]),
-        "empirical_precision": operational["empirical_precision"],
-        "precision_wilson_95_low": operational["precision_wilson_95_low"],
-        "precision_wilson_95_high": operational["precision_wilson_95_high"],
-        "coverage": float(operational["coverage"]),
+        # Retain the original flat statistics as group-level aliases so callers
+        # that inspect support cannot accidentally treat duplicate rows as
+        # independent evidence. The explicit nested views distinguish selection
+        # evidence from listing-level operations.
+        **group_evidence,
+        "group_evidence": group_evidence,
+        "listing_operation": listing_operation,
     }
 
 
@@ -316,16 +422,18 @@ def select_thresholds(
     grid_step: float = 0.01,
     *,
     no_match_correct: Sequence[int] | np.ndarray | None = None,
+    duplicate_group_ids: Sequence[str] | np.ndarray | None = None,
     min_auto_match_support: int = 20,
     min_auto_no_match_support: int = 20,
     warn: bool = True,
 ) -> dict[str, Any]:
     """Select only automatic actions with adequate precision and support.
 
-    Each action is screened independently. Compatible feasible actions are
-    combined for maximum automatic coverage; an action is never enabled by
-    relaxing its evidence requirements. If the feasible regions overlap, the
-    best feasible standalone action is enabled and the other remains review.
+    Each action is screened independently on unique exact-duplicate groups.
+    Group correctness is the conservative logical-all aggregation of member
+    labels. Compatible feasible actions are combined for maximum group coverage;
+    the selected thresholds are then applied to every individual listing. When
+    group IDs are omitted, each input row is treated as its own evidence unit.
     """
 
     for name, target in (
@@ -343,11 +451,18 @@ def select_thresholds(
     labels, score_array, no_match_labels = _validated_inputs(
         y_true, scores, no_match_correct
     )
+    group_ids = _validated_duplicate_group_ids(
+        duplicate_group_ids,
+        labels.size,
+    )
+    group_inverse, group_count = _duplicate_group_index(group_ids)
     grid = _threshold_grid(grid_step)
 
     no_match_rows = _threshold_diagnostics(
         score_array,
         no_match_labels,
+        group_inverse,
+        group_count,
         grid,
         action=AUTO_NO_MATCH,
         precision_target=float(no_match_precision_target),
@@ -356,6 +471,8 @@ def select_thresholds(
     match_rows = _threshold_diagnostics(
         score_array,
         labels,
+        group_inverse,
+        group_count,
         grid,
         action=AUTO_MATCH,
         precision_target=float(match_precision_target),
@@ -429,10 +546,16 @@ def select_thresholds(
         "match_threshold": match_threshold,
         "no_match_threshold": no_match_threshold,
         AUTO_MATCH: _selected_action_result(
-            operational[AUTO_MATCH], feasible=bool(feasible_match)
+            operational[AUTO_MATCH],
+            selected_by_action.get(AUTO_MATCH),
+            feasible=bool(feasible_match),
+            group_count=group_count,
         ),
         AUTO_NO_MATCH: _selected_action_result(
-            operational[AUTO_NO_MATCH], feasible=bool(feasible_no_match)
+            operational[AUTO_NO_MATCH],
+            selected_by_action.get(AUTO_NO_MATCH),
+            feasible=bool(feasible_no_match),
+            group_count=group_count,
         ),
         "both_constraints_met": both_constraints_met,
         "selection_mode": selection_mode,
@@ -441,6 +564,7 @@ def select_thresholds(
         "manual_review_rate": operational["manual_review_rate"],
         "n_manual_review": operational["n_manual_review"],
         "n_total": operational["n_total"],
+        "n_groups": group_count,
         "warning": warning,
         "threshold_diagnostics": diagnostics,
     }

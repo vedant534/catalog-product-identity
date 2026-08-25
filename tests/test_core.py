@@ -7,13 +7,20 @@ import warnings
 import joblib
 import numpy as np
 import pandas as pd
+import pytest
 
-from src.data import make_entity_splits
-from src.evaluate import build_listing_predictions
+from src.data import make_entity_splits, validate_assignment_ids
+from src.evaluate import (
+    build_listing_predictions,
+    compute_no_match_metrics,
+    compute_pair_metrics,
+    compute_retrieval_metrics,
+    save_corrected_resplit_reports,
+)
 from src.features import HYBRID_FEATURE_COLUMNS, build_pair_features, pair_feature
 from src.model import fit_calibrated_logistic, predict_probabilities
 from src.policy import apply_policy, select_thresholds
-from src.retrieval import fit_lexical_retriever, retrieve_candidates
+from src.retrieval import _cosine_scores, fit_lexical_retriever, retrieve_candidates
 
 
 def _product(product_id: str, title: str, manufacturer: str, price: float) -> dict:
@@ -89,6 +96,20 @@ def test_entity_components_never_cross_splits() -> None:
         assignments["google_id"].isin(["g0", "g1"]), "split"
     ]
     assert shared_component_splits.nunique() == 1
+
+
+def test_assignment_ids_must_match_normalized_google_ids_exactly() -> None:
+    google = pd.DataFrame({"product_id": ["g1", "g2"]})
+    valid = pd.DataFrame({"google_id": ["g1", "g2"], "split": ["train", "test"]})
+    validate_assignment_ids(google, valid)
+
+    duplicate = pd.DataFrame({"google_id": ["g1", "g1"]})
+    with pytest.raises(ValueError, match="must be unique"):
+        validate_assignment_ids(google, duplicate)
+
+    missing_and_extra = pd.DataFrame({"google_id": ["g1", "g3"]})
+    with pytest.raises(ValueError, match=r"missing=1, extra=1"):
+        validate_assignment_ids(google, missing_and_extra)
 
 
 def test_policy_threshold_boundaries_are_inclusive() -> None:
@@ -268,6 +289,58 @@ def test_threshold_support_is_required_independently_per_action() -> None:
     assert supported["auto_no_match"]["support"] >= 20
 
 
+def test_duplicate_groups_drive_threshold_selection_but_report_listings() -> None:
+    scores: list[float] = []
+    no_match_correct: list[int] = []
+    group_ids: list[str] = []
+    for group_id in ("correct_1", "correct_2", "correct_3", "correct_4"):
+        scores.extend([0.02] * 4)
+        no_match_correct.extend([1] * 4)
+        group_ids.extend([group_id] * 4)
+    # This exact-duplicate group is label-inconsistent. Even though one listing
+    # is correct, the whole group must be conservative incorrect evidence.
+    scores.extend([0.02, 0.02])
+    no_match_correct.extend([1, 0])
+    group_ids.extend(["inconsistent", "inconsistent"])
+    scores.extend([0.03, 0.03])
+    no_match_correct.extend([0, 0])
+    group_ids.extend(["wrong_1", "wrong_2"])
+
+    no_match = np.asarray(no_match_correct, dtype=int)
+    selection = select_thresholds(
+        y_true=1 - no_match,
+        scores=np.asarray(scores),
+        no_match_correct=no_match,
+        duplicate_group_ids=np.asarray(group_ids),
+        match_precision_target=0.75,
+        no_match_precision_target=0.75,
+        min_auto_match_support=8,
+        min_auto_no_match_support=5,
+        grid_step=0.01,
+        warn=False,
+    )
+
+    assert selection["no_match_threshold"] == 0.02
+    assert selection["auto_match"]["enabled"] is False
+    group = selection["auto_no_match"]["group_evidence"]
+    listings = selection["auto_no_match"]["listing_operation"]
+    assert (group["correct_count"], group["support"]) == (4, 5)
+    assert group["empirical_precision"] == 0.8
+    assert (listings["correct_count"], listings["support"]) == (17, 18)
+    assert listings["coverage"] == 0.9
+    assert listings["precision_wilson_95_low"] is not None
+
+    loose = next(
+        row
+        for row in selection["threshold_diagnostics"]
+        if row["action"] == "auto_no_match" and row["threshold"] == 0.03
+    )
+    assert loose["group_empirical_precision"] == 4 / 7
+    assert loose["listing_empirical_precision"] == 17 / 20
+    assert loose["listing_empirical_precision"] >= 0.75
+    assert loose["feasible"] is False
+
+
 def test_listing_policy_uses_one_top_row_and_shared_tie_break() -> None:
     candidates = pd.DataFrame(
         [
@@ -305,3 +378,90 @@ def test_listing_policy_uses_one_top_row_and_shared_tie_break() -> None:
     assert listings.loc["g_no_match", "action"] == "auto_no_match"
     assert bool(listings.loc["g_no_match", "action_correct"])
     assert "action" not in candidates.columns
+
+
+def test_corrected_report_bundle_is_additive_and_refuses_overwrite(tmp_path) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    development_files = {
+        "metrics.json": b"development metrics\n",
+        "model_comparison.csv": b"development comparison\n",
+        "validation_precision_coverage.csv": b"development thresholds\n",
+    }
+    for name, content in development_files.items():
+        (reports / name).write_bytes(content)
+
+    corrected = reports / "corrected_resplit"
+    retrieval = {
+        "lexical_recall_at_1": 1.0,
+        "dense_recall_at_1": 1.0,
+        "rrf_recall_at_1": 1.0,
+        "union_per_channel_recall_at_1": 1.0,
+    }
+    save_corrected_resplit_reports(
+        corrected,
+        {"stage": "corrected-eval"},
+        pd.DataFrame({"google_id": ["g1"], "action": ["manual_review"]}),
+        pd.DataFrame({"error_type": ["none"]}),
+        [0, 1],
+        [0.1, 0.9],
+        [0, 1],
+        [0.1, 0.9],
+        retrieval,
+    )
+
+    assert {path.name for path in corrected.iterdir()} == {
+        "metrics.json",
+        "listing_predictions.csv",
+        "error_examples.csv",
+        "corrected_resplit_retrieval_recall.png",
+        "corrected_resplit_pair_precision_recall_curve.png",
+        "corrected_resplit_pair_reliability_plot.png",
+        "corrected_resplit_top_candidate_reliability_plot.png",
+    }
+    for name, content in development_files.items():
+        assert (reports / name).read_bytes() == content
+    with pytest.raises(FileExistsError, match="already exists"):
+        save_corrected_resplit_reports(
+            corrected,
+            {},
+            pd.DataFrame(),
+            pd.DataFrame(),
+            [0, 1],
+            [0.1, 0.9],
+            [0, 1],
+            [0.1, 0.9],
+            retrieval,
+        )
+
+
+def test_small_correctness_helpers_fail_clearly_and_name_metrics_honestly() -> None:
+    pair_metrics = compute_pair_metrics(
+        [0, 1],
+        [0.4, 0.6],
+        classification_threshold=0.7,
+    )
+    assert pair_metrics["classification_threshold"] == 0.7
+    assert {"precision", "recall", "f1"}.issubset(pair_metrics)
+    assert not any(key.endswith("_at_0_5") for key in pair_metrics)
+
+    no_actions = pd.DataFrame(
+        {
+            "has_gold_listing": [True, False],
+            "probability": [0.8, 0.2],
+            "action": ["manual_review", "manual_review"],
+        }
+    )
+    assert compute_no_match_metrics(no_actions)["precision_at_policy"] is None
+
+    minimal = pd.DataFrame({"google_id": ["g1"], "amazon_id": ["a1"]})
+    with pytest.raises(ValueError, match="candidate depth"):
+        compute_retrieval_metrics(
+            minimal,
+            minimal,
+            minimal,
+            ks=[2],
+            per_channel_candidate_depth=1,
+        )
+    with pytest.raises(ValueError, match="one- or two-dimensional"):
+        _cosine_scores(np.asarray(1.0), np.eye(2))

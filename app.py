@@ -46,7 +46,10 @@ def load_demo_assets(config: dict):
     catalog_tfidf = sparse.load_npz(required["tfidf"])
     catalog_dense = np.load(required["dense"])
     matcher = joblib.load(required["matcher"])
-    encoder = load_sentence_encoder(matcher["sentence_model_name"])
+    encoder = load_sentence_encoder(
+        matcher["sentence_model_name"],
+        revision=matcher["sentence_model_revision"],
+    )
     return vectorizer, catalog, catalog_tfidf, catalog_dense, matcher, encoder
 
 
@@ -67,7 +70,10 @@ def main() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     st.title("Catalog Product Identity")
-    st.caption("Retrieve Amazon candidates, estimate identity, and abstain when uncertain.")
+    st.caption(
+        "Local portfolio demo: retrieve Amazon candidates, estimate identity, "
+        "and abstain when uncertain."
+    )
 
     try:
         assets = load_demo_assets(config)
@@ -75,12 +81,34 @@ def main() -> None:
         st.error(str(error))
         st.stop()
     vectorizer, catalog, catalog_tfidf, catalog_dense, matcher, encoder = assets
+    policy = matcher["policy"]
+    auto_match_status = "enabled" if policy["auto_match"]["enabled"] else "disabled"
+    auto_no_match_status = (
+        "enabled" if policy["auto_no_match"]["enabled"] else "disabled"
+    )
+    no_match_threshold = (
+        policy["auto_no_match"]["threshold"]
+        if policy["auto_no_match"]["enabled"]
+        else None
+    )
+    threshold_text = (
+        f"{float(no_match_threshold):.2f}"
+        if no_match_threshold is not None
+        else "not active"
+    )
+    st.markdown("**Frozen validation policy**")
+    st.write(
+        f"`auto_match`: **{auto_match_status}**  \n"
+        f"`auto_no_match`: **{auto_no_match_status}**  \n"
+        f"Active no-match threshold: **{threshold_text}**  \n"
+        "All other pair match scores go to **manual review**."
+    )
 
     with st.form("listing_form"):
-        title = st.text_input("Product title")
-        manufacturer = st.text_input("Manufacturer (optional)")
-        description = st.text_area("Description (optional)")
-        price_text = st.text_input("Price (optional)")
+        title = st.text_input("Product title", max_chars=300)
+        manufacturer = st.text_input("Manufacturer (optional)", max_chars=200)
+        description = st.text_area("Description (optional)", max_chars=2000)
+        price_text = st.text_input("Price (optional)", max_chars=32)
         submitted = st.form_submit_button("Find catalog identity")
 
     if not submitted:
@@ -137,7 +165,6 @@ def main() -> None:
     )
 
     best = select_top_candidates(results).iloc[0]
-    policy = matcher["policy"]
     decision = apply_policy(
         float(best["probability"]),
         match_threshold=(
@@ -168,7 +195,10 @@ def main() -> None:
         "lexical_score",
         "dense_score",
     ]
-    st.dataframe(results[display_columns].reset_index(drop=True), width="stretch")
+    display = results[display_columns].rename(
+        columns={"probability": "Pair match score"}
+    )
+    st.dataframe(display.reset_index(drop=True), width="stretch")
 
 
 if __name__ == "__main__":

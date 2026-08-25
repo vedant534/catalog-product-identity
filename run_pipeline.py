@@ -1,4 +1,4 @@
-"""Run validation development or the separately authorized final holdout."""
+"""Run development or the separately authorized corrected-resplit evaluation."""
 
 from __future__ import annotations
 
@@ -16,7 +16,12 @@ import pandas as pd
 import yaml
 from scipy import sparse
 
-from src.data import load_dataset, make_entity_splits
+from src.data import (
+    load_dataset,
+    make_entity_splits,
+    official_raw_csv_sha256,
+    validate_assignment_ids,
+)
 from src.evaluate import (
     build_listing_predictions,
     compute_calibration_metrics,
@@ -27,6 +32,7 @@ from src.evaluate import (
     compute_sensitivity_metrics,
     exact_title_ambiguity_ids,
     extract_error_examples,
+    save_corrected_resplit_reports,
     save_stage_reports,
 )
 from src.features import build_pair_features
@@ -47,7 +53,21 @@ from src.retrieval import (
 
 
 DEVELOP_STAGE = "develop"
-FINAL_TEST_STAGE = "final-test"
+CORRECTED_EVAL_STAGE = "corrected-eval"
+CORRECTED_RESPLIT_PROTOCOL = "predeclared_corrected_resplit"
+CORRECTED_ASSIGNMENT_SPLIT = "test"
+
+DEVELOPMENT_REPORT_FILENAMES = (
+    "metrics.json",
+    "model_comparison.csv",
+    "validation_precision_coverage.csv",
+    "validation_listing_predictions.csv",
+    "validation_error_examples.csv",
+    "validation_retrieval_recall.png",
+    "validation_pair_precision_recall_curve.png",
+    "validation_pair_reliability_plot.png",
+    "validation_top_candidate_reliability_plot.png",
+)
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -85,12 +105,60 @@ def listings_for_split(
     split_name: str,
 ) -> pd.DataFrame:
     """Materialize only the explicitly requested split."""
+    validate_assignment_ids(google, assignments)
     listing_ids = set(
         assignments.loc[assignments["split"].eq(split_name), "google_id"].astype(str)
     )
     return google.loc[google["product_id"].astype(str).isin(listing_ids)].reset_index(
         drop=True
     )
+
+
+def _development_assignments(
+    artifacts_dir: Path,
+    google: pd.DataFrame,
+    gold: pd.DataFrame,
+    *,
+    seed: int,
+    ratios: tuple[float, float, float],
+) -> pd.DataFrame:
+    """Reuse the existing corrected-resplit assignments when available."""
+    path = artifacts_dir / "split_assignments.csv"
+    if path.exists():
+        assignments = pd.read_csv(
+            path,
+            dtype={"google_id": str, "component_id": str, "duplicate_group_id": str},
+        )
+        required = {
+            "google_id",
+            "component_id",
+            "split",
+            "duplicate_group_id",
+            "duplicate_group_size",
+            "ambiguous_label",
+        }
+        missing = required - set(assignments.columns)
+        if missing:
+            raise ValueError(
+                "Existing split assignments are missing columns: "
+                + ", ".join(sorted(missing))
+            )
+        unknown_splits = set(assignments["split"].dropna().astype(str)) - {
+            "train",
+            "validation",
+            CORRECTED_ASSIGNMENT_SPLIT,
+        }
+        if unknown_splits:
+            raise ValueError(
+                "Existing split assignments contain unknown split labels: "
+                + ", ".join(sorted(unknown_splits))
+            )
+        validate_assignment_ids(google, assignments)
+        return assignments
+
+    assignments = make_entity_splits(google, gold, seed=seed, ratios=ratios)
+    validate_assignment_ids(google, assignments)
+    return assignments
 
 
 def gold_for_listing_ids(gold: pd.DataFrame, listing_ids: Iterable[str]) -> pd.DataFrame:
@@ -193,6 +261,9 @@ def _top_policy_labels(
 
 def _action_policy_snapshot(selection: Mapping[str, Any]) -> dict[str, Any]:
     return {
+        "selection_evidence_unit": "unique_duplicate_group_id",
+        "selection_group_count": int(selection["n_groups"]),
+        "listing_count": int(selection["n_total"]),
         "auto_match": dict(selection["auto_match"]),
         "auto_no_match": dict(selection["auto_no_match"]),
         "both_constraints_met": bool(selection["both_constraints_met"]),
@@ -201,9 +272,58 @@ def _action_policy_snapshot(selection: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _frozen_artifact_paths(artifacts_dir: Path) -> dict[str, Path]:
+    return {
+        "snapshot": artifacts_dir / "run_config.json",
+        "assignments": artifacts_dir / "split_assignments.csv",
+        "vectorizer": artifacts_dir / "tfidf_vectorizer.joblib",
+        "catalog": artifacts_dir / "amazon_catalog.csv",
+        "tfidf": artifacts_dir / "catalog_tfidf.npz",
+        "dense": artifacts_dir / "catalog_dense.npy",
+        "matcher": artifacts_dir / "matcher.joblib",
+    }
+
+
+def _development_report_paths(reports_dir: Path) -> dict[str, Path]:
+    return {
+        filename: reports_dir / filename for filename in DEVELOPMENT_REPORT_FILENAMES
+    }
+
+
+def _require_nonempty_files(paths: Mapping[str, Path], label: str) -> None:
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Missing {label}(s): " + ", ".join(missing))
+    empty = [str(path) for path in paths.values() if path.stat().st_size == 0]
+    if empty:
+        raise ValueError(f"Empty {label}(s): " + ", ".join(empty))
+
+
+def _frozen_inputs(
+    config: Mapping[str, Any],
+    raw_csv_sha256: Mapping[str, str],
+    amazon: pd.DataFrame,
+    catalog_tfidf: sparse.spmatrix,
+    catalog_embeddings: np.ndarray,
+) -> dict[str, Any]:
+    return {
+        "raw_csv_sha256": dict(raw_csv_sha256),
+        "sentence_encoder": {
+            "model_name": str(config["sentence_model"]),
+            "revision": str(config["sentence_model_revision"]),
+        },
+        "catalog": {
+            "row_count": int(len(amazon)),
+            "tfidf_shape": [int(value) for value in catalog_tfidf.shape],
+            "dense_shape": [int(value) for value in catalog_embeddings.shape],
+        },
+    }
+
+
 def _save_frozen_artifacts(
     output_dir: Path,
     config: Mapping[str, Any],
+    frozen_inputs: Mapping[str, Any],
     assignments: pd.DataFrame,
     vectorizer: Any,
     amazon: pd.DataFrame,
@@ -220,8 +340,10 @@ def _save_frozen_artifacts(
     assignments.to_csv(output_dir / "split_assignments.csv", index=False)
     snapshot = {
         "stage": DEVELOP_STAGE,
-        "final_test_status": "not_run",
+        "evaluation_protocol": CORRECTED_RESPLIT_PROTOCOL,
+        "corrected_resplit_status_at_development": "not_run",
         "config": dict(config),
+        "frozen_inputs": dict(frozen_inputs),
         "selected_model": matcher_bundle["selected_model"],
         "feature_columns": list(matcher_bundle["feature_columns"]),
         "policy": matcher_bundle["policy"],
@@ -234,18 +356,8 @@ def _save_frozen_artifacts(
 def _load_frozen_artifacts(
     artifacts_dir: Path,
 ) -> tuple[dict[str, Any], pd.DataFrame, Any, pd.DataFrame, Any, np.ndarray, Any]:
-    required = {
-        "snapshot": artifacts_dir / "run_config.json",
-        "assignments": artifacts_dir / "split_assignments.csv",
-        "vectorizer": artifacts_dir / "tfidf_vectorizer.joblib",
-        "catalog": artifacts_dir / "amazon_catalog.csv",
-        "tfidf": artifacts_dir / "catalog_tfidf.npz",
-        "dense": artifacts_dir / "catalog_dense.npy",
-        "matcher": artifacts_dir / "matcher.joblib",
-    }
-    missing = [str(path) for path in required.values() if not path.exists()]
-    if missing:
-        raise FileNotFoundError("Missing frozen development artifact(s): " + ", ".join(missing))
+    required = _frozen_artifact_paths(artifacts_dir)
+    _require_nonempty_files(required, "frozen development artifact")
     snapshot = json.loads(required["snapshot"].read_text(encoding="utf-8"))
     assignments = pd.read_csv(
         required["assignments"],
@@ -260,6 +372,101 @@ def _load_frozen_artifacts(
         np.load(required["dense"]),
         joblib.load(required["matcher"]),
     )
+
+
+def _validate_corrected_snapshot(
+    snapshot: Mapping[str, Any],
+    matcher: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if snapshot.get("stage") != DEVELOP_STAGE:
+        raise ValueError("Frozen snapshot must come from the development stage.")
+    if snapshot.get("evaluation_protocol") != CORRECTED_RESPLIT_PROTOCOL:
+        raise ValueError("Frozen snapshot has an incompatible evaluation protocol.")
+    config = snapshot.get("config")
+    frozen_inputs = snapshot.get("frozen_inputs")
+    if not isinstance(config, dict) or not isinstance(frozen_inputs, dict):
+        raise ValueError("Frozen snapshot is missing configuration or input metadata.")
+
+    encoder = frozen_inputs.get("sentence_encoder")
+    if not isinstance(encoder, dict):
+        raise ValueError("Frozen snapshot is missing sentence encoder metadata.")
+    expected_name = str(config.get("sentence_model", ""))
+    expected_revision = str(config.get("sentence_model_revision", ""))
+    if not expected_name or not expected_revision:
+        raise ValueError("Frozen snapshot must pin the sentence encoder and revision.")
+    if encoder.get("model_name") != expected_name or encoder.get("revision") != expected_revision:
+        raise ValueError("Frozen sentence encoder metadata does not match configuration.")
+    if (
+        matcher.get("sentence_model_name") != expected_name
+        or matcher.get("sentence_model_revision") != expected_revision
+    ):
+        raise ValueError("Frozen matcher uses incompatible sentence encoder metadata.")
+    if matcher.get("selected_model") != snapshot.get("selected_model"):
+        raise ValueError("Frozen matcher and snapshot disagree on the selected model.")
+    if matcher.get("policy") != snapshot.get("policy"):
+        raise ValueError("Frozen matcher and snapshot disagree on the policy.")
+    return config, frozen_inputs
+
+
+def _validate_frozen_catalog(
+    frozen_inputs: Mapping[str, Any],
+    vectorizer: Any,
+    amazon: pd.DataFrame,
+    catalog_tfidf: sparse.spmatrix,
+    catalog_embeddings: np.ndarray,
+) -> None:
+    metadata = frozen_inputs.get("catalog")
+    if not isinstance(metadata, Mapping):
+        raise ValueError("Frozen snapshot is missing catalog dimension metadata.")
+    if getattr(catalog_tfidf, "ndim", None) != 2:
+        raise ValueError("Frozen TF-IDF catalog matrix must be two-dimensional.")
+    if np.asarray(catalog_embeddings).ndim != 2:
+        raise ValueError("Frozen dense catalog matrix must be two-dimensional.")
+
+    try:
+        expected_rows = int(metadata["row_count"])
+        expected_tfidf_shape = tuple(int(value) for value in metadata["tfidf_shape"])
+        expected_dense_shape = tuple(int(value) for value in metadata["dense_shape"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Frozen catalog dimension metadata is invalid.") from error
+    if len(expected_tfidf_shape) != 2 or len(expected_dense_shape) != 2:
+        raise ValueError("Frozen catalog matrix shapes must have two dimensions.")
+
+    actual_tfidf_shape = tuple(int(value) for value in catalog_tfidf.shape)
+    actual_dense_shape = tuple(int(value) for value in catalog_embeddings.shape)
+    if len(amazon) != expected_rows:
+        raise ValueError("Frozen catalog row count does not match the development snapshot.")
+    if actual_tfidf_shape != expected_tfidf_shape:
+        raise ValueError("Frozen TF-IDF matrix shape does not match the development snapshot.")
+    if actual_dense_shape != expected_dense_shape:
+        raise ValueError("Frozen dense matrix shape does not match the development snapshot.")
+    if expected_tfidf_shape[0] != expected_rows or expected_dense_shape[0] != expected_rows:
+        raise ValueError("Frozen catalog matrices must have one row per catalog product.")
+    if "product_id" not in amazon or not amazon["product_id"].astype(str).is_unique:
+        raise ValueError("Frozen catalog product IDs must be present and unique.")
+
+    vectorizer_width = int(vectorizer.transform([""]).shape[1])
+    if vectorizer_width != expected_tfidf_shape[1]:
+        raise ValueError("Frozen vectorizer and TF-IDF matrix feature counts differ.")
+
+
+def _verify_raw_csv_digests(
+    raw_dir: Path,
+    frozen_inputs: Mapping[str, Any],
+) -> None:
+    expected = frozen_inputs.get("raw_csv_sha256")
+    if not isinstance(expected, Mapping) or not expected:
+        raise ValueError("Frozen snapshot is missing raw CSV SHA-256 digests.")
+    actual = official_raw_csv_sha256(raw_dir)
+    expected_digests = {str(name): str(digest) for name, digest in expected.items()}
+    if actual != expected_digests:
+        mismatched = sorted(set(actual) | set(expected_digests))
+        mismatched = [
+            name for name in mismatched if actual.get(name) != expected_digests.get(name)
+        ]
+        raise ValueError(
+            "Official raw CSV SHA-256 mismatch: " + ", ".join(mismatched)
+        )
 
 
 def _stage_evaluation(
@@ -291,6 +498,7 @@ def _stage_evaluation(
         ks=[int(value) for value in config["recall_ks"]],
         all_listing_ids=listing_ids,
         latency_seconds=latency_seconds,
+        per_channel_candidate_depth=min(int(config["top_k"]), len(amazon)),
     )
     retrieval["primary_retriever"] = "fixed_budget_rrf"
     retrieval["rrf_constant"] = float(config["rrf_constant"])
@@ -343,18 +551,20 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
     reports_dir = Path(str(config["reports_dir"]))
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading benchmark and creating duplicate-aware assignments...")
+    print("Loading benchmark and the existing duplicate-aware assignments...")
     amazon, google, gold = load_dataset(
         raw_dir, download_if_missing=True, url=str(config["dataset_url"])
     )
-    assignments = make_entity_splits(
+    raw_csv_sha256 = official_raw_csv_sha256(raw_dir)
+    assignments = _development_assignments(
+        artifacts_dir,
         google,
         gold,
         seed=split_seed,
         ratios=tuple(float(value) for value in config["split_ratios"]),
     )
-    # Intentionally materialize only train and validation. Test membership exists
-    # only in assignments until the separately authorized final-test stage.
+    # Intentionally materialize only train and validation. Corrected-resplit
+    # membership remains only in assignments until separately authorized.
     train = listings_for_split(google, assignments, "train")
     validation = listings_for_split(google, assignments, "validation")
     train_gold = gold_for_listing_ids(gold, train["product_id"].astype(str))
@@ -368,7 +578,10 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
         min_df=int(config["tfidf_min_df"]),
         max_features=int(config["tfidf_max_features"]),
     )
-    encoder = load_sentence_encoder(str(config["sentence_model"]))
+    encoder = load_sentence_encoder(
+        str(config["sentence_model"]),
+        str(config["sentence_model_revision"]),
+    )
     batch_size = int(config["dense_batch_size"])
     catalog_embeddings = encode_products(amazon, encoder, batch_size=batch_size)
     train_embeddings = encode_products(train, encoder, batch_size=batch_size)
@@ -450,12 +663,36 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
     validation_predictions = validation_candidates[["google_id", "amazon_id"]].copy()
     validation_predictions["probability"] = validation_probabilities
 
+    ambiguous_validation_groups = set(
+        assignments.loc[
+            assignments["split"].eq("validation")
+            & assignments["ambiguous_label"].astype(bool),
+            "duplicate_group_id",
+        ].astype(str)
+    )
+    policy_excluded_ids = set(
+        assignments.loc[
+            assignments["split"].eq("validation")
+            & assignments["duplicate_group_id"].astype(str).isin(
+                ambiguous_validation_groups
+            ),
+            "google_id",
+        ].astype(str)
+    )
     policy_candidates = validation_predictions.loc[
-        ~validation_predictions["google_id"].astype(str).isin(ambiguous_validation_ids)
+        ~validation_predictions["google_id"].astype(str).isin(policy_excluded_ids)
     ].reset_index(drop=True)
     policy_top, match_correct, no_match_correct = _top_policy_labels(
         policy_candidates, validation_gold
     )
+    duplicate_group_by_google = assignments.set_index("google_id")[
+        "duplicate_group_id"
+    ]
+    policy_duplicate_group_ids = policy_top["google_id"].map(
+        duplicate_group_by_google
+    )
+    if policy_duplicate_group_ids.isna().any():
+        raise ValueError("Every policy-selection listing must have a duplicate group.")
     threshold_selection = select_thresholds(
         match_correct,
         policy_top["probability"].to_numpy(dtype=float),
@@ -463,6 +700,7 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
         no_match_precision_target=float(config["no_match_precision_target"]),
         grid_step=float(config["threshold_grid_step"]),
         no_match_correct=no_match_correct,
+        duplicate_group_ids=policy_duplicate_group_ids.to_numpy(dtype=str),
         min_auto_match_support=int(config["min_auto_match_support"]),
         min_auto_no_match_support=int(config["min_auto_no_match_support"]),
         warn=False,
@@ -472,12 +710,20 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
         **selected_bundle,
         "selected_model": selected_name,
         "sentence_model_name": str(config["sentence_model"]),
+        "sentence_model_revision": str(config["sentence_model_revision"]),
         "top_k": top_k,
         "rrf_constant": rrf_constant,
         "split_seed": split_seed,
         "model_seed": model_seed,
         "policy": policy,
     }
+    frozen_inputs = _frozen_inputs(
+        config,
+        raw_csv_sha256,
+        amazon,
+        catalog_tfidf,
+        catalog_embeddings,
+    )
 
     stage_metrics, listing_predictions, errors, pair_labels, top_labels = _stage_evaluation(
         split_label="validation",
@@ -496,15 +742,17 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
     injected = train_candidates["gold_injected"].fillna(False).astype(bool)
     metrics = {
         "stage": DEVELOP_STAGE,
-        "final_test": {
+        "evaluation_protocol": CORRECTED_RESPLIT_PROTOCOL,
+        "frozen_inputs": frozen_inputs,
+        "corrected_resplit": {
             "status": "not_run",
-            "test_listings_encoded": False,
-            "test_candidates_retrieved": False,
-            "test_features_constructed": False,
-            "test_pairs_scored": False,
-            "test_metrics_computed": False,
-            "test_sensitivity_computed": False,
-            "test_examples_inspected": False,
+            "reserved_listings_encoded": False,
+            "reserved_candidates_retrieved": False,
+            "reserved_features_constructed": False,
+            "reserved_pairs_scored": False,
+            "reserved_metrics_computed": False,
+            "reserved_sensitivity_computed": False,
+            "reserved_examples_inspected": False,
         },
         "run": {
             "split_seed": split_seed,
@@ -518,7 +766,7 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
             "amazon_records": len(amazon),
             "google_records": len(google),
             "gold_pairs": len(gold),
-            "duplicate_groups": int(assignments["duplicate_group_id"].nunique()),
+            "signature_groups_total": int(assignments["duplicate_group_id"].nunique()),
             "exact_duplicate_groups": int(
                 assignments.loc[assignments["duplicate_group_size"].gt(1), "duplicate_group_id"].nunique()
             ),
@@ -531,8 +779,10 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
                 "google_records": len(validation),
                 "gold_pairs": len(validation_gold),
             },
-            "test": {
-                "google_records": int(assignments["split"].eq("test").sum()),
+            "corrected_resplit": {
+                "google_records": int(
+                    assignments["split"].eq(CORRECTED_ASSIGNMENT_SPLIT).sum()
+                ),
                 "evaluation_status": "not_run",
             },
         },
@@ -557,6 +807,7 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
     _save_frozen_artifacts(
         artifacts_dir,
         config,
+        frozen_inputs,
         assignments,
         vectorizer,
         amazon,
@@ -580,14 +831,17 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
     )
     print(f"Selected model: {selected_name}")
     print(f"Policy mode: {policy['selection_mode']}")
-    print("Final test status: NOT RUN")
+    print("Corrected-resplit evaluation status: NOT RUN")
     print(f"Validation reports written to {reports_dir.resolve()}")
     print(f"Frozen artifacts written to {artifacts_dir.resolve()}")
     return {"metrics": metrics, "reports": report_paths}
 
 
-def run_final_test(config_path: str | Path) -> dict[str, Any]:
-    """Evaluate the frozen test split without retraining or reselection."""
+def run_corrected_eval(
+    config_path: str | Path,
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Evaluate the predeclared corrected resplit without retraining."""
     locator_config = load_config(config_path)
     artifacts_dir = Path(str(locator_config["artifacts_dir"]))
     (
@@ -599,76 +853,126 @@ def run_final_test(config_path: str | Path) -> dict[str, Any]:
         catalog_embeddings,
         matcher,
     ) = _load_frozen_artifacts(artifacts_dir)
-    if snapshot.get("final_test_status") != "not_run":
-        raise ValueError("Frozen development snapshot is not awaiting final evaluation.")
-    config = snapshot["config"]
+    config, frozen_inputs = _validate_corrected_snapshot(snapshot, matcher)
+
+    reports_dir = Path(str(config["reports_dir"]))
+    development_reports = _development_report_paths(reports_dir)
+    _require_nonempty_files(development_reports, "development report")
+    development_metrics = json.loads(
+        development_reports["metrics.json"].read_text(encoding="utf-8")
+    )
+    if (
+        development_metrics.get("stage") != DEVELOP_STAGE
+        or development_metrics.get("evaluation_protocol")
+        != CORRECTED_RESPLIT_PROTOCOL
+    ):
+        raise ValueError("Development metrics use an incompatible evaluation protocol.")
+    if development_metrics.get("frozen_inputs") != frozen_inputs:
+        raise ValueError("Development metrics and frozen snapshot disagree on inputs.")
+
+    corrected_output = (
+        Path(output_dir)
+        if output_dir is not None
+        else reports_dir / "corrected_resplit"
+    )
+    if corrected_output.exists():
+        raise FileExistsError(
+            "Corrected-resplit output already exists; choose a new --output-dir "
+            "for a deliberate rerun: "
+            + str(corrected_output)
+        )
+
+    _validate_frozen_catalog(
+        frozen_inputs,
+        vectorizer,
+        amazon,
+        catalog_tfidf,
+        catalog_embeddings,
+    )
+    raw_dir = Path(str(config["raw_dir"]))
+    _verify_raw_csv_digests(raw_dir, frozen_inputs)
     set_reproducible_seed(int(config["model_seed"]))
     configure_caches(config)
-    _, google, gold = load_dataset(
-        Path(str(config["raw_dir"])),
-        download_if_missing=True,
+    source_amazon, google, gold = load_dataset(
+        raw_dir,
+        download_if_missing=False,
         url=str(config["dataset_url"]),
     )
-    test = listings_for_split(google, assignments, "test")
-    test_gold = gold_for_listing_ids(gold, test["product_id"].astype(str))
-    encoder = load_sentence_encoder(str(matcher["sentence_model_name"]))
-    started = time.perf_counter()
-    test_embeddings = encode_products(
-        test, encoder, batch_size=int(config["dense_batch_size"])
+    if len(source_amazon) != len(amazon):
+        raise ValueError("Normalized raw catalog row count differs from frozen catalog.")
+    validate_assignment_ids(google, assignments)
+    evaluation = listings_for_split(google, assignments, CORRECTED_ASSIGNMENT_SPLIT)
+    evaluation_gold = gold_for_listing_ids(
+        gold, evaluation["product_id"].astype(str)
     )
-    test_candidates, test_pool = retrieve_candidates_with_diagnostics(
-        test,
+    encoder = load_sentence_encoder(
+        str(matcher["sentence_model_name"]),
+        str(matcher["sentence_model_revision"]),
+        local_files_only=True,
+    )
+    started = time.perf_counter()
+    evaluation_embeddings = encode_products(
+        evaluation, encoder, batch_size=int(config["dense_batch_size"])
+    )
+    if (
+        evaluation_embeddings.ndim != 2
+        or evaluation_embeddings.shape[1] != catalog_embeddings.shape[1]
+    ):
+        raise ValueError("Corrected-resplit embeddings do not match frozen catalog dimensions.")
+    evaluation_candidates, evaluation_pool = retrieve_candidates_with_diagnostics(
+        evaluation,
         amazon,
         vectorizer,
         catalog_tfidf,
-        test_embeddings,
+        evaluation_embeddings,
         catalog_embeddings,
         top_k=int(matcher["top_k"]),
         rrf_constant=float(matcher["rrf_constant"]),
     )
     latency = time.perf_counter() - started
-    test_features = feature_candidates(test_candidates, test, amazon)
-    probabilities = predict_probabilities(matcher, test_features)
+    evaluation_features = feature_candidates(evaluation_candidates, evaluation, amazon)
+    probabilities = predict_probabilities(matcher, evaluation_features)
     stage_metrics, listings, errors, pair_labels, top_labels = _stage_evaluation(
-        split_label="test",
-        candidates=test_candidates,
-        diagnostic_pool=test_pool,
-        features=test_features,
+        split_label="corrected_resplit",
+        candidates=evaluation_candidates,
+        diagnostic_pool=evaluation_pool,
+        features=evaluation_features,
         probabilities=probabilities,
-        listings=test,
-        gold=test_gold,
-        google=test,
+        listings=evaluation,
+        gold=evaluation_gold,
+        google=evaluation,
         amazon=amazon,
         policy=matcher["policy"],
         config=config,
         latency_seconds=latency,
     )
-    reports_dir = Path(str(config["reports_dir"]))
-    metrics_path = reports_dir / "metrics.json"
-    development_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-    final_metrics = {
-        **development_metrics,
-        "stage": FINAL_TEST_STAGE,
-        "final_test": {"status": "completed_once", **stage_metrics},
-    }
-    final_metrics["splits"] = {
-        **development_metrics["splits"],
-        "test": {
-            **development_metrics["splits"]["test"],
-            "gold_pairs": len(test_gold),
-            "evaluation_status": "completed_once",
+    corrected_metrics = {
+        "stage": CORRECTED_EVAL_STAGE,
+        "evaluation_protocol": CORRECTED_RESPLIT_PROTOCOL,
+        "evidence_role": "transparent_secondary_confirmation",
+        "frozen_inputs": frozen_inputs,
+        "run": {
+            "split_seed": int(config["split_seed"]),
+            "model_seed": int(config["model_seed"]),
+            "top_k": int(matcher["top_k"]),
+            "rrf_constant": float(matcher["rrf_constant"]),
+            "recall_ks": [int(value) for value in config["recall_ks"]],
         },
+        "development_checkpoint": {
+            "selected_model": str(matcher["selected_model"]),
+            "feature_columns": list(matcher["feature_columns"]),
+            "policy": matcher["policy"],
+        },
+        "split": {
+            "assignment_label": CORRECTED_ASSIGNMENT_SPLIT,
+            "google_records": len(evaluation),
+            "gold_pairs": len(evaluation_gold),
+        },
+        "corrected_resplit": {"status": "completed", **stage_metrics},
     }
-    comparison = pd.read_csv(reports_dir / "model_comparison.csv")
-    diagnostics = pd.read_csv(reports_dir / "validation_precision_coverage.csv").to_dict(
-        orient="records"
-    )
-    report_paths = save_stage_reports(
-        reports_dir,
-        "test",
-        final_metrics,
-        comparison,
-        diagnostics,
+    report_paths = save_corrected_resplit_reports(
+        corrected_output,
+        corrected_metrics,
         listings,
         errors,
         pair_labels,
@@ -677,31 +981,42 @@ def run_final_test(config_path: str | Path) -> dict[str, Any]:
         listings["probability"].to_numpy(dtype=float),
         stage_metrics["retrieval"],
     )
-    snapshot["final_test_status"] = "completed_once"
-    (artifacts_dir / "run_config.json").write_text(
-        json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    print("Final test evaluated from frozen development artifacts.")
-    print(f"Final reports written to {reports_dir.resolve()}")
-    return {"metrics": final_metrics, "reports": report_paths}
+    print("Corrected resplit evaluated from frozen development artifacts.")
+    print(f"Corrected-resplit reports written to {corrected_output.resolve()}")
+    return {"metrics": corrected_metrics, "reports": report_paths}
 
 
-def run(stage: str, config_path: str | Path = "config.yaml") -> dict[str, Any]:
+def run(
+    stage: str,
+    config_path: str | Path = "config.yaml",
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
     if stage == DEVELOP_STAGE:
+        if output_dir is not None:
+            raise ValueError("--output-dir is valid only for corrected-eval.")
         return run_develop(config_path)
-    if stage == FINAL_TEST_STAGE:
-        return run_final_test(config_path)
+    if stage == CORRECTED_EVAL_STAGE:
+        return run_corrected_eval(config_path, output_dir=output_dir)
     raise ValueError(f"Unknown stage: {stage}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--stage", choices=(DEVELOP_STAGE, FINAL_TEST_STAGE), required=True
+        "--stage", choices=(DEVELOP_STAGE, CORRECTED_EVAL_STAGE), required=True
     )
     parser.add_argument("--config", default="config.yaml", help="Path to YAML config")
+    parser.add_argument(
+        "--output-dir",
+        help=(
+            "Fresh corrected-resplit bundle directory; valid only for corrected-eval. "
+            "Defaults to reports/corrected_resplit from the frozen configuration."
+        ),
+    )
     args = parser.parse_args()
-    run(args.stage, args.config)
+    if args.output_dir is not None and args.stage != CORRECTED_EVAL_STAGE:
+        parser.error("--output-dir is valid only for corrected-eval")
+    run(args.stage, args.config, output_dir=args.output_dir)
 
 
 if __name__ == "__main__":

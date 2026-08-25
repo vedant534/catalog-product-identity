@@ -12,17 +12,11 @@ import pandas as pd
 
 try:
     from rapidfuzz import fuzz
-except ImportError:  # pragma: no cover - requirements install RapidFuzz.
-    from difflib import SequenceMatcher
-
-    class _FallbackFuzz:
-        @staticmethod
-        def ratio(left: str, right: str) -> float:
-            return 100.0 * SequenceMatcher(None, left, right).ratio()
-
-        token_set_ratio = ratio
-
-    fuzz = _FallbackFuzz()
+except ImportError as error:  # pragma: no cover - dependency installation failure.
+    raise ImportError(
+        "RapidFuzz is required for the matcher feature definitions. "
+        "Install the project requirements before running the pipeline."
+    ) from error
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")

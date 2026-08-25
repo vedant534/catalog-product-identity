@@ -1,22 +1,45 @@
 {
+  "corrected_resplit": {
+    "reserved_candidates_retrieved": false,
+    "reserved_examples_inspected": false,
+    "reserved_features_constructed": false,
+    "reserved_listings_encoded": false,
+    "reserved_metrics_computed": false,
+    "reserved_pairs_scored": false,
+    "reserved_sensitivity_computed": false,
+    "status": "not_run"
+  },
   "dataset": {
     "amazon_records": 1363,
     "ambiguous_unmapped_rows": 1,
-    "duplicate_groups": 3085,
     "exact_duplicate_groups": 93,
     "exact_duplicate_rows": 234,
     "gold_pairs": 1300,
-    "google_records": 3226
+    "google_records": 3226,
+    "signature_groups_total": 3085
   },
-  "final_test": {
-    "status": "not_run",
-    "test_candidates_retrieved": false,
-    "test_examples_inspected": false,
-    "test_features_constructed": false,
-    "test_listings_encoded": false,
-    "test_metrics_computed": false,
-    "test_pairs_scored": false,
-    "test_sensitivity_computed": false
+  "evaluation_protocol": "predeclared_corrected_resplit",
+  "frozen_inputs": {
+    "catalog": {
+      "dense_shape": [
+        1363,
+        384
+      ],
+      "row_count": 1363,
+      "tfidf_shape": [
+        1363,
+        50000
+      ]
+    },
+    "raw_csv_sha256": {
+      "Amazon.csv": "cabc0379070c595eca65c4a69c77b3267b97f8a81b303e77115b52e6e534e65f",
+      "Amzon_GoogleProducts_perfectMapping.csv": "885eda7da34ed00809975d34452800e7fbde9ef0540fb60474a18dca15fa4fe7",
+      "GoogleProducts.csv": "18fbec453670e40e0969fdaffe71e92ba62a24c49b0c8341fe4621e70e402e3f"
+    },
+    "sentence_encoder": {
+      "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+      "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+    }
   },
   "model_selection": {
     "ambiguous_validation_listings_excluded": 0,
@@ -62,7 +85,7 @@
     "top_k": 20
   },
   "splits": {
-    "test": {
+    "corrected_resplit": {
       "evaluation_status": "not_run",
       "google_records": 484
     },
@@ -135,10 +158,10 @@
       "definition": "Officially unmapped listings with an exact normalized-title Amazon collision are excluded, not relabelled.",
       "excluded_listing_count": 6,
       "listing_policy": {
-        "accuracy_on_automatic_decisions": 0.9515418502202643,
+        "accuracy_on_automatic_decisions": 0.9619047619047619,
         "assumed_no_match_listing_count": 288,
-        "assumed_no_match_review_count": 72,
-        "assumed_no_match_review_rate": 0.25,
+        "assumed_no_match_review_count": 86,
+        "assumed_no_match_review_rate": 0.2986111111111111,
         "auto_match": {
           "correct_count": 0,
           "empirical_precision": null,
@@ -149,37 +172,37 @@
           "wilson_95_low": null
         },
         "auto_no_match": {
-          "correct_count": 216,
-          "empirical_precision": 0.9515418502202643,
-          "error_count": 11,
-          "listing_coverage": 0.47489539748953974,
-          "support": 227,
-          "wilson_95_high": 0.9727293218861068,
-          "wilson_95_low": 0.9153260605711384
+          "correct_count": 202,
+          "empirical_precision": 0.9619047619047619,
+          "error_count": 8,
+          "listing_coverage": 0.4393305439330544,
+          "support": 210,
+          "wilson_95_high": 0.9805723555818997,
+          "wilson_95_low": 0.9266418070500007
         },
-        "automatic_coverage": 0.47489539748953974,
+        "automatic_coverage": 0.4393305439330544,
         "end_to_end_auto_match_rate": 0.0,
         "listing_count": 478,
-        "manual_review_count": 251,
-        "manual_review_rate": 0.5251046025104602,
+        "manual_review_count": 268,
+        "manual_review_rate": 0.5606694560669456,
         "matched_listing_count": 190,
-        "matched_review_count": 179,
-        "matched_review_rate": 0.9421052631578948
+        "matched_review_count": 182,
+        "matched_review_rate": 0.9578947368421052
       },
       "no_match_detection": {
         "assumption": "Official mapping absence is treated as no-match.",
         "average_precision": 0.9542373911385335,
         "count": 478,
         "positive_count": 288,
-        "precision_at_policy": 0.9515418502202643,
-        "recall_at_policy": 0.75
+        "precision_at_policy": 0.9619047619047619,
+        "recall_at_policy": 0.7013888888888888
       }
     },
     "listing_policy": {
-      "accuracy_on_automatic_decisions": 0.9515418502202643,
+      "accuracy_on_automatic_decisions": 0.9619047619047619,
       "assumed_no_match_listing_count": 294,
-      "assumed_no_match_review_count": 78,
-      "assumed_no_match_review_rate": 0.2653061224489796,
+      "assumed_no_match_review_count": 92,
+      "assumed_no_match_review_rate": 0.3129251700680272,
       "auto_match": {
         "correct_count": 0,
         "empirical_precision": null,
@@ -190,39 +213,40 @@
         "wilson_95_low": null
       },
       "auto_no_match": {
-        "correct_count": 216,
-        "empirical_precision": 0.9515418502202643,
-        "error_count": 11,
-        "listing_coverage": 0.4690082644628099,
-        "support": 227,
-        "wilson_95_high": 0.9727293218861068,
-        "wilson_95_low": 0.9153260605711384
+        "correct_count": 202,
+        "empirical_precision": 0.9619047619047619,
+        "error_count": 8,
+        "listing_coverage": 0.43388429752066116,
+        "support": 210,
+        "wilson_95_high": 0.9805723555818997,
+        "wilson_95_low": 0.9266418070500007
       },
-      "automatic_coverage": 0.4690082644628099,
+      "automatic_coverage": 0.43388429752066116,
       "end_to_end_auto_match_rate": 0.0,
       "listing_count": 484,
-      "manual_review_count": 257,
-      "manual_review_rate": 0.53099173553719,
+      "manual_review_count": 274,
+      "manual_review_rate": 0.5661157024793388,
       "matched_listing_count": 190,
-      "matched_review_count": 179,
-      "matched_review_rate": 0.9421052631578948
+      "matched_review_count": 182,
+      "matched_review_rate": 0.9578947368421052
     },
     "no_match_detection": {
       "assumption": "Official mapping absence is treated as no-match.",
       "average_precision": 0.9483137308409746,
       "count": 484,
       "positive_count": 294,
-      "precision_at_policy": 0.9515418502202643,
-      "recall_at_policy": 0.7346938775510204
+      "precision_at_policy": 0.9619047619047619,
+      "recall_at_policy": 0.6870748299319728
     },
     "pair_matching": {
       "brier_score": 0.010343215545738865,
+      "classification_threshold": 0.5,
       "count": 9680,
-      "f1_at_0_5": 0.5923566878980892,
+      "f1": 0.5923566878980892,
       "positive_count": 191,
       "pr_auc": 0.6441419341771109,
-      "precision_at_0_5": 0.7560975609756098,
-      "recall_at_0_5": 0.4869109947643979,
+      "precision": 0.7560975609756098,
+      "recall": 0.4869109947643979,
       "roc_auc": 0.9855721615383809
     },
     "policy_selection": {
@@ -233,28 +257,68 @@
         "enabled": false,
         "error_count": 0,
         "feasible": false,
+        "group_evidence": {
+          "correct_count": 0,
+          "coverage": 0.0,
+          "empirical_precision": null,
+          "error_count": 0,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 0
+        },
+        "listing_operation": {
+          "correct_count": 0,
+          "coverage": 0.0,
+          "empirical_precision": null,
+          "error_count": 0,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 0
+        },
         "precision_wilson_95_high": null,
         "precision_wilson_95_low": null,
         "support": 0,
         "threshold": null
       },
       "auto_no_match": {
-        "correct_count": 216,
-        "coverage": 0.4690082644628099,
-        "empirical_precision": 0.9515418502202643,
+        "correct_count": 193,
+        "coverage": 0.4258474576271186,
+        "empirical_precision": 0.9601990049751243,
         "enabled": true,
-        "error_count": 11,
+        "error_count": 8,
         "feasible": true,
-        "precision_wilson_95_high": 0.9727293218861068,
-        "precision_wilson_95_low": 0.9153260605711384,
-        "support": 227,
-        "threshold": 0.03
+        "group_evidence": {
+          "correct_count": 193,
+          "coverage": 0.4258474576271186,
+          "empirical_precision": 0.9601990049751243,
+          "error_count": 8,
+          "precision_wilson_95_high": 0.9796965756473863,
+          "precision_wilson_95_low": 0.92344090963062,
+          "support": 201
+        },
+        "listing_operation": {
+          "correct_count": 202,
+          "coverage": 0.43388429752066116,
+          "empirical_precision": 0.9619047619047619,
+          "error_count": 8,
+          "precision_wilson_95_high": 0.9805723555818997,
+          "precision_wilson_95_low": 0.9266418070500007,
+          "support": 210
+        },
+        "precision_wilson_95_high": 0.9796965756473863,
+        "precision_wilson_95_low": 0.92344090963062,
+        "support": 201,
+        "threshold": 0.02
       },
       "both_constraints_met": false,
+      "listing_count": 484,
+      "selection_evidence_unit": "unique_duplicate_group_id",
+      "selection_group_count": 472,
       "selection_mode": "auto_no_match_only",
       "warning": "Both automatic actions could not be enabled together while meeting their precision and support requirements. Only auto_no_match is enabled; all other listings require manual review."
     },
     "retrieval": {
+      "amortized_batch_retrieval_ms_per_listing": 2.629326101323236,
       "candidate_budget": 20,
       "dense_recall_at_10": 0.9631578947368421,
       "dense_recall_at_20": 0.9947368421052631,
@@ -264,10 +328,9 @@
       "lexical_recall_at_20": 0.968421052631579,
       "lexical_recall_at_5": 0.9157894736842105,
       "listing_count": 484,
-      "mean_latency_ms": 2.6077724693050564,
       "mean_primary_candidate_count": 20.0,
       "primary_retriever": "fixed_budget_rrf",
-      "retrieval_latency_seconds": 1.2621618751436472,
+      "retrieval_latency_seconds": 1.272593833040446,
       "rrf_constant": 60.0,
       "rrf_recall_at_10": 0.9736842105263158,
       "rrf_recall_at_20": 0.9947368421052631,

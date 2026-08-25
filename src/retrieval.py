@@ -67,18 +67,49 @@ def fit_lexical_retriever(
     return vectorizer, vectorizer.transform(catalog_text).tocsr()
 
 
-def load_sentence_encoder(model_name: str, device: str | None = None) -> Any:
-    """Load the frozen encoder from cache first, downloading only when absent."""
+def load_sentence_encoder(
+    model_name: str,
+    revision: str,
+    device: str | None = None,
+    *,
+    local_files_only: bool = False,
+) -> Any:
+    """Load one explicitly pinned encoder revision.
+
+    Development and the local demo may download that exact revision when it is
+    absent. Corrected evaluation passes ``local_files_only=True`` so its query
+    vectors cannot silently come from a different remote revision.
+    """
     from sentence_transformers import SentenceTransformer
+
+    if not str(revision).strip():
+        raise ValueError("A non-empty sentence encoder revision is required.")
+
+    arguments = {
+        "device": device,
+        "revision": str(revision),
+    }
+    if local_files_only:
+        try:
+            return SentenceTransformer(
+                model_name,
+                local_files_only=True,
+                **arguments,
+            )
+        except (OSError, ValueError) as error:
+            raise RuntimeError(
+                "The pinned sentence encoder revision is unavailable locally; "
+                "corrected evaluation cannot download or substitute an encoder."
+            ) from error
 
     try:
         return SentenceTransformer(
             model_name,
-            device=device,
             local_files_only=True,
+            **arguments,
         )
     except (OSError, ValueError):
-        return SentenceTransformer(model_name, device=device)
+        return SentenceTransformer(model_name, **arguments)
 
 
 def encode_products(
@@ -100,26 +131,34 @@ def encode_products(
 
 
 def _cosine_scores(query_matrix: Any, catalog_matrix: Any) -> np.ndarray:
-    if query_matrix.shape[1] != catalog_matrix.shape[1]:
+    query_is_sparse = sparse.issparse(query_matrix)
+    catalog_is_sparse = sparse.issparse(catalog_matrix)
+    query = query_matrix if query_is_sparse else np.asarray(query_matrix, dtype=np.float32)
+    catalog = (
+        catalog_matrix
+        if catalog_is_sparse
+        else np.asarray(catalog_matrix, dtype=np.float32)
+    )
+    if not query_is_sparse and query.ndim == 1:
+        query = query.reshape(1, -1)
+    if not catalog_is_sparse and catalog.ndim == 1:
+        catalog = catalog.reshape(1, -1)
+    if getattr(query, "ndim", None) != 2 or getattr(catalog, "ndim", None) != 2:
+        raise ValueError("Query and catalog matrices must be one- or two-dimensional arrays.")
+    if query.shape[1] != catalog.shape[1]:
         raise ValueError("Query and catalog matrices must have the same feature count")
-    if catalog_matrix.shape[0] == 0:
+    if catalog.shape[0] == 0:
         raise ValueError("Catalog must contain at least one product")
 
-    if sparse.issparse(query_matrix) or sparse.issparse(catalog_matrix):
-        query_normalized = normalize(sparse.csr_matrix(query_matrix), norm="l2", copy=True)
+    if query_is_sparse or catalog_is_sparse:
+        query_normalized = normalize(sparse.csr_matrix(query), norm="l2", copy=True)
         catalog_normalized = normalize(
-            sparse.csr_matrix(catalog_matrix), norm="l2", copy=True
+            sparse.csr_matrix(catalog), norm="l2", copy=True
         )
         return (query_normalized @ catalog_normalized.T).toarray()
 
-    query_array = np.asarray(query_matrix, dtype=np.float32)
-    catalog_array = np.asarray(catalog_matrix, dtype=np.float32)
-    if query_array.ndim == 1:
-        query_array = query_array.reshape(1, -1)
-    if catalog_array.ndim == 1:
-        catalog_array = catalog_array.reshape(1, -1)
-    query_normalized = normalize(query_array, norm="l2", copy=True)
-    catalog_normalized = normalize(catalog_array, norm="l2", copy=True)
+    query_normalized = normalize(query, norm="l2", copy=True)
+    catalog_normalized = normalize(catalog, norm="l2", copy=True)
     return np.asarray(query_normalized @ catalog_normalized.T)
 
 
