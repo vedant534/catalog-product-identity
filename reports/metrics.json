@@ -39,6 +39,15 @@
     "sentence_encoder": {
       "model_name": "sentence-transformers/all-MiniLM-L6-v2",
       "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+    },
+    "split_assignments": {
+      "row_count": 3226,
+      "rows_by_split": {
+        "test": 484,
+        "train": 2258,
+        "validation": 484
+      },
+      "sha256": "4bc0394c757ba60ca728f9fd78de9844cbae6a2172397f6d09a0b12cd2fa13e1"
     }
   },
   "model_selection": {
@@ -83,6 +92,15 @@
     ],
     "split_seed": 20260825,
     "top_k": 20
+  },
+  "split_assignments": {
+    "row_count": 3226,
+    "rows_by_split": {
+      "test": 484,
+      "train": 2258,
+      "validation": 484
+    },
+    "sha256": "4bc0394c757ba60ca728f9fd78de9844cbae6a2172397f6d09a0b12cd2fa13e1"
   },
   "splits": {
     "corrected_resplit": {
@@ -166,7 +184,25 @@
           "correct_count": 0,
           "empirical_precision": null,
           "error_count": 0,
+          "group_evidence": {
+            "correct_count": 0,
+            "coverage": 0.0,
+            "empirical_precision": null,
+            "error_count": 0,
+            "precision_wilson_95_high": null,
+            "precision_wilson_95_low": null,
+            "support": 0
+          },
           "listing_coverage": 0.0,
+          "listing_operation": {
+            "correct_count": 0,
+            "coverage": 0.0,
+            "empirical_precision": null,
+            "error_count": 0,
+            "precision_wilson_95_high": null,
+            "precision_wilson_95_low": null,
+            "support": 0
+          },
           "support": 0,
           "wilson_95_high": null,
           "wilson_95_low": null
@@ -175,14 +211,61 @@
           "correct_count": 202,
           "empirical_precision": 0.9619047619047619,
           "error_count": 8,
+          "group_evidence": {
+            "correct_count": 193,
+            "coverage": 0.4313304721030043,
+            "empirical_precision": 0.9601990049751243,
+            "error_count": 8,
+            "precision_wilson_95_high": 0.9796965756473863,
+            "precision_wilson_95_low": 0.92344090963062,
+            "support": 201
+          },
           "listing_coverage": 0.4393305439330544,
+          "listing_operation": {
+            "correct_count": 202,
+            "coverage": 0.4393305439330544,
+            "empirical_precision": 0.9619047619047619,
+            "error_count": 8,
+            "precision_wilson_95_high": 0.9805723555818997,
+            "precision_wilson_95_low": 0.9266418070500007,
+            "support": 210
+          },
           "support": 210,
           "wilson_95_high": 0.9805723555818997,
           "wilson_95_low": 0.9266418070500007
         },
         "automatic_coverage": 0.4393305439330544,
+        "duplicate_group_count": 466,
         "end_to_end_auto_match_rate": 0.0,
         "listing_count": 478,
+        "manual_review": {
+          "correct_count": null,
+          "correctness_definition": "Undefined: manual review is an abstention, not an automatic decision.",
+          "empirical_precision": null,
+          "error_count": null,
+          "group_evidence": {
+            "correct_count": null,
+            "coverage": 0.5686695278969958,
+            "empirical_precision": null,
+            "error_count": null,
+            "precision_wilson_95_high": null,
+            "precision_wilson_95_low": null,
+            "support": 265
+          },
+          "listing_coverage": 0.5606694560669456,
+          "listing_operation": {
+            "correct_count": null,
+            "coverage": 0.5606694560669456,
+            "empirical_precision": null,
+            "error_count": null,
+            "precision_wilson_95_high": null,
+            "precision_wilson_95_low": null,
+            "support": 268
+          },
+          "support": 268,
+          "wilson_95_high": null,
+          "wilson_95_low": null
+        },
         "manual_review_count": 268,
         "manual_review_rate": 0.5606694560669456,
         "matched_listing_count": 190,
@@ -207,7 +290,25 @@
         "correct_count": 0,
         "empirical_precision": null,
         "error_count": 0,
+        "group_evidence": {
+          "correct_count": 0,
+          "coverage": 0.0,
+          "empirical_precision": null,
+          "error_count": 0,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 0
+        },
         "listing_coverage": 0.0,
+        "listing_operation": {
+          "correct_count": 0,
+          "coverage": 0.0,
+          "empirical_precision": null,
+          "error_count": 0,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 0
+        },
         "support": 0,
         "wilson_95_high": null,
         "wilson_95_low": null
@@ -216,14 +317,61 @@
         "correct_count": 202,
         "empirical_precision": 0.9619047619047619,
         "error_count": 8,
+        "group_evidence": {
+          "correct_count": 193,
+          "coverage": 0.4258474576271186,
+          "empirical_precision": 0.9601990049751243,
+          "error_count": 8,
+          "precision_wilson_95_high": 0.9796965756473863,
+          "precision_wilson_95_low": 0.92344090963062,
+          "support": 201
+        },
         "listing_coverage": 0.43388429752066116,
+        "listing_operation": {
+          "correct_count": 202,
+          "coverage": 0.43388429752066116,
+          "empirical_precision": 0.9619047619047619,
+          "error_count": 8,
+          "precision_wilson_95_high": 0.9805723555818997,
+          "precision_wilson_95_low": 0.9266418070500007,
+          "support": 210
+        },
         "support": 210,
         "wilson_95_high": 0.9805723555818997,
         "wilson_95_low": 0.9266418070500007
       },
       "automatic_coverage": 0.43388429752066116,
+      "duplicate_group_count": 472,
       "end_to_end_auto_match_rate": 0.0,
       "listing_count": 484,
+      "manual_review": {
+        "correct_count": null,
+        "correctness_definition": "Undefined: manual review is an abstention, not an automatic decision.",
+        "empirical_precision": null,
+        "error_count": null,
+        "group_evidence": {
+          "correct_count": null,
+          "coverage": 0.5741525423728814,
+          "empirical_precision": null,
+          "error_count": null,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 271
+        },
+        "listing_coverage": 0.5661157024793388,
+        "listing_operation": {
+          "correct_count": null,
+          "coverage": 0.5661157024793388,
+          "empirical_precision": null,
+          "error_count": null,
+          "precision_wilson_95_high": null,
+          "precision_wilson_95_low": null,
+          "support": 274
+        },
+        "support": 274,
+        "wilson_95_high": null,
+        "wilson_95_low": null
+      },
       "manual_review_count": 274,
       "manual_review_rate": 0.5661157024793388,
       "matched_listing_count": 190,
@@ -318,7 +466,7 @@
       "warning": "Both automatic actions could not be enabled together while meeting their precision and support requirements. Only auto_no_match is enabled; all other listings require manual review."
     },
     "retrieval": {
-      "amortized_batch_retrieval_ms_per_listing": 2.629326101323236,
+      "amortized_batch_retrieval_ms_per_listing": 2.861724690195512,
       "candidate_budget": 20,
       "dense_recall_at_10": 0.9631578947368421,
       "dense_recall_at_20": 0.9947368421052631,
@@ -330,7 +478,7 @@
       "listing_count": 484,
       "mean_primary_candidate_count": 20.0,
       "primary_retriever": "fixed_budget_rrf",
-      "retrieval_latency_seconds": 1.272593833040446,
+      "retrieval_latency_seconds": 1.3850747500546277,
       "rrf_constant": 60.0,
       "rrf_recall_at_10": 0.9736842105263158,
       "rrf_recall_at_20": 0.9947368421052631,

@@ -9,9 +9,21 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.data import make_entity_splits, validate_assignment_ids
+from run_pipeline import (
+    CORRECTED_RESPLIT_PROTOCOL,
+    DEVELOP_STAGE,
+    _validate_corrected_snapshot,
+    _validate_frozen_split_assignments,
+)
+from src.data import (
+    make_entity_splits,
+    split_assignment_metadata,
+    validate_assignment_ids,
+    validate_split_assignments,
+)
 from src.evaluate import (
     build_listing_predictions,
+    compute_listing_metrics,
     compute_no_match_metrics,
     compute_pair_metrics,
     compute_retrieval_metrics,
@@ -112,6 +124,42 @@ def test_assignment_ids_must_match_normalized_google_ids_exactly() -> None:
         validate_assignment_ids(google, missing_and_extra)
 
 
+def test_corrected_preflight_rejects_same_count_membership_swap() -> None:
+    google = pd.DataFrame(
+        [
+            _product(f"g{index:02d}", f"Unique Product {index}", "Maker", 10 + index)
+            for index in range(24)
+        ]
+    )
+    gold = pd.DataFrame(columns=["google_id", "amazon_id"])
+    ratios = (0.5, 0.25, 0.25)
+    seed = 20260825
+    expected = validate_split_assignments(
+        google,
+        make_entity_splits(google, gold, seed=seed, ratios=ratios),
+    )
+    tampered = expected.copy()
+    validation_index = tampered.index[tampered["split"].eq("validation")][0]
+    test_index = tampered.index[tampered["split"].eq("test")][0]
+    tampered.loc[validation_index, "split"] = "test"
+    tampered.loc[test_index, "split"] = "validation"
+
+    # The swap preserves IDs, counts, and singleton group isolation. The
+    # deterministic regeneration check must still reject changed membership.
+    tampered = validate_split_assignments(google, tampered)
+    assert split_assignment_metadata(tampered)["rows_by_split"] == (
+        split_assignment_metadata(expected)["rows_by_split"]
+    )
+    with pytest.raises(ValueError, match="canonical membership"):
+        _validate_frozen_split_assignments(
+            {"split_assignments": split_assignment_metadata(tampered)},
+            tampered,
+            google,
+            gold,
+            {"split_seed": seed, "split_ratios": ratios},
+        )
+
+
 def test_policy_threshold_boundaries_are_inclusive() -> None:
     actions = apply_policy(
         np.array([0.0, 0.2, 0.2001, 0.7999, 0.8, 1.0]),
@@ -126,6 +174,7 @@ def test_policy_threshold_boundaries_are_inclusive() -> None:
         "auto_match",
         "auto_match",
     ]
+
 
 def test_synthetic_pipeline_and_joblib_round_trip(tmp_path) -> None:
     amazon = pd.DataFrame(
@@ -368,6 +417,12 @@ def test_listing_policy_uses_one_top_row_and_shared_tie_break() -> None:
         gold,
         ["g_tie", "g_retrieval", "g_rerank", "g_no_match"],
         policy,
+        duplicate_group_by_listing={
+            "g_tie": "group_tie",
+            "g_retrieval": "group_retrieval",
+            "g_rerank": "group_rerank",
+            "g_no_match": "group_no_match",
+        },
     ).set_index("google_id")
 
     assert len(listings) == 4
@@ -377,7 +432,108 @@ def test_listing_policy_uses_one_top_row_and_shared_tie_break() -> None:
     assert listings.loc["g_rerank", "ranking_outcome"] == "reranking_miss"
     assert listings.loc["g_no_match", "action"] == "auto_no_match"
     assert bool(listings.loc["g_no_match", "action_correct"])
+    assert listings.loc["g_no_match", "duplicate_group_id"] == "group_no_match"
     assert "action" not in candidates.columns
+
+
+def test_listing_policy_reports_conservative_group_and_listing_evidence() -> None:
+    listings = pd.DataFrame(
+        {
+            "google_id": ["g1", "g2", "g3", "g4", "g5"],
+            "duplicate_group_id": ["dup_a", "dup_a", "dup_b", "dup_b", "single"],
+            "action": [
+                "auto_no_match",
+                "auto_no_match",
+                "auto_no_match",
+                "auto_no_match",
+                "manual_review",
+            ],
+            "has_gold_listing": [False, False, False, True, False],
+            "is_gold_pair": [False, False, False, False, False],
+            "action_correct": pd.array([True, True, True, False, pd.NA], dtype="boolean"),
+        }
+    )
+
+    metrics = compute_listing_metrics(listings)
+    no_match = metrics["auto_no_match"]
+    assert no_match["group_evidence"]["support"] == 2
+    assert no_match["group_evidence"]["correct_count"] == 1
+    assert no_match["group_evidence"]["error_count"] == 1
+    assert no_match["group_evidence"]["empirical_precision"] == 0.5
+    assert no_match["group_evidence"]["coverage"] == pytest.approx(2 / 3)
+    assert no_match["group_evidence"]["precision_wilson_95_low"] is not None
+    assert no_match["listing_operation"]["support"] == 4
+    assert no_match["listing_operation"]["correct_count"] == 3
+    assert no_match["listing_operation"]["empirical_precision"] == 0.75
+    assert no_match["listing_operation"]["coverage"] == 0.8
+    assert metrics["auto_match"]["group_evidence"]["empirical_precision"] is None
+    assert metrics["auto_match"]["listing_operation"]["empirical_precision"] is None
+    assert metrics["manual_review"]["group_evidence"]["support"] == 1
+    assert metrics["manual_review"]["group_evidence"]["coverage"] == pytest.approx(
+        1 / 3
+    )
+    assert metrics["manual_review"]["listing_operation"]["support"] == 1
+    assert metrics["manual_review"]["listing_operation"]["coverage"] == 0.2
+    assert metrics["manual_review"]["listing_operation"]["correct_count"] is None
+
+
+def test_frozen_metadata_mismatches_fail_clearly() -> None:
+    config = {
+        "split_seed": 20260825,
+        "model_seed": 42,
+        "split_ratios": [0.7, 0.15, 0.15],
+        "top_k": 20,
+        "rrf_constant": 60.0,
+        "sentence_model": "encoder",
+        "sentence_model_revision": "revision",
+    }
+    assignment_metadata = {
+        "sha256": "0" * 64,
+        "row_count": 4,
+        "rows_by_split": {"train": 2, "validation": 1, "test": 1},
+    }
+    policy = {
+        "auto_match": {"enabled": False, "threshold": None},
+        "auto_no_match": {"enabled": True, "threshold": 0.02},
+    }
+    snapshot = {
+        "stage": DEVELOP_STAGE,
+        "evaluation_protocol": CORRECTED_RESPLIT_PROTOCOL,
+        "corrected_resplit_status_at_development": "not_run",
+        "config": dict(config),
+        "frozen_inputs": {
+            "sentence_encoder": {
+                "model_name": "encoder",
+                "revision": "revision",
+            },
+            "split_assignments": dict(assignment_metadata),
+        },
+        "split_assignments": dict(assignment_metadata),
+        "selected_model": "hybrid_logistic",
+        "feature_columns": ["lexical_similarity", "dense_similarity"],
+        "policy": policy,
+    }
+    matcher = {
+        "split_seed": 20260825,
+        "model_seed": 42,
+        "top_k": 20,
+        "rrf_constant": 60.0,
+        "sentence_model_name": "encoder",
+        "sentence_model_revision": "revision",
+        "selected_model": "hybrid_logistic",
+        "feature_columns": ["lexical_similarity", "dense_similarity"],
+        "policy": policy,
+    }
+
+    _validate_corrected_snapshot(config, snapshot, matcher)
+    with pytest.raises(ValueError, match="top_k"):
+        _validate_corrected_snapshot(config, snapshot, {**matcher, "top_k": 21})
+    with pytest.raises(ValueError, match="feature column order"):
+        _validate_corrected_snapshot(
+            config,
+            snapshot,
+            {**matcher, "feature_columns": list(reversed(matcher["feature_columns"]))},
+        )
 
 
 def test_corrected_report_bundle_is_additive_and_refuses_overwrite(tmp_path) -> None:
@@ -401,7 +557,13 @@ def test_corrected_report_bundle_is_additive_and_refuses_overwrite(tmp_path) -> 
     save_corrected_resplit_reports(
         corrected,
         {"stage": "corrected-eval"},
-        pd.DataFrame({"google_id": ["g1"], "action": ["manual_review"]}),
+        pd.DataFrame(
+            {
+                "google_id": ["g1"],
+                "duplicate_group_id": ["group_g1"],
+                "action": ["manual_review"],
+            }
+        ),
         pd.DataFrame({"error_type": ["none"]}),
         [0, 1],
         [0.1, 0.9],
@@ -419,6 +581,9 @@ def test_corrected_report_bundle_is_additive_and_refuses_overwrite(tmp_path) -> 
         "corrected_resplit_pair_reliability_plot.png",
         "corrected_resplit_top_candidate_reliability_plot.png",
     }
+    assert "duplicate_group_id" in pd.read_csv(
+        corrected / "listing_predictions.csv"
+    ).columns
     for name, content in development_files.items():
         assert (reports / name).read_bytes() == content
     with pytest.raises(FileExistsError, match="already exists"):

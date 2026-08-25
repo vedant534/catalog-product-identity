@@ -279,6 +279,36 @@ def _group_action_statistics(
     return _action_statistics(group_selected, group_correct, group_count)
 
 
+def group_action_statistics(
+    selected: Sequence[bool] | np.ndarray,
+    correct_labels: Sequence[int] | np.ndarray,
+    duplicate_group_ids: Sequence[str] | np.ndarray,
+) -> dict[str, float | int | None]:
+    """Aggregate listing actions into conservative exact-duplicate evidence.
+
+    A group contributes one support unit when any member receives the action,
+    and it is correct only when every member has a correct label for that action.
+    This is the same aggregation used during threshold selection.
+    """
+    selected_array = np.asarray(selected, dtype=bool).reshape(-1)
+    labels = _as_binary_labels(correct_labels, "correct_labels")
+    if selected_array.size != labels.size:
+        raise ValueError("selected and correct_labels must have equal lengths.")
+    if labels.size == 0:
+        raise ValueError("At least one listing is required for group evidence.")
+    group_ids = _validated_duplicate_group_ids(
+        duplicate_group_ids,
+        labels.size,
+    )
+    group_inverse, group_count = _duplicate_group_index(group_ids)
+    return _group_action_statistics(
+        selected_array,
+        labels,
+        group_inverse,
+        group_count,
+    )
+
+
 def _prefixed_statistics(
     prefix: str,
     statistics: dict[str, float | int | None],

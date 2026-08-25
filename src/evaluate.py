@@ -21,7 +21,14 @@ from sklearn.metrics import (
 )
 
 from src.model import select_top_candidates
-from src.policy import AUTO_MATCH, AUTO_NO_MATCH, MANUAL_REVIEW, apply_policy, wilson_interval
+from src.policy import (
+    AUTO_MATCH,
+    AUTO_NO_MATCH,
+    MANUAL_REVIEW,
+    apply_policy,
+    group_action_statistics,
+    wilson_interval,
+)
 
 
 def _rate(numerator: int, denominator: int) -> float:
@@ -192,11 +199,51 @@ def compute_calibration_metrics(
     }
 
 
+def _validated_duplicate_group_mapping(
+    listing_ids: set[str],
+    duplicate_group_by_listing: Mapping[str, str],
+) -> dict[str, str]:
+    """Return one non-empty duplicate-group ID for every requested listing."""
+    if not isinstance(duplicate_group_by_listing, Mapping):
+        raise ValueError("duplicate_group_by_listing must be a listing-to-group mapping")
+
+    normalized: dict[str, str] = {}
+    for raw_listing_id, raw_group_id in duplicate_group_by_listing.items():
+        listing_id = str(raw_listing_id).strip()
+        if not listing_id or listing_id in normalized:
+            raise ValueError(
+                "duplicate_group_by_listing must contain unique non-empty listing IDs"
+            )
+        if raw_group_id is None or bool(pd.isna(raw_group_id)):
+            raise ValueError("Duplicate-group IDs must be non-empty and non-missing")
+        group_id = str(raw_group_id).strip()
+        if not group_id:
+            raise ValueError("Duplicate-group IDs must be non-empty and non-missing")
+        normalized[listing_id] = group_id
+
+    missing = sorted(listing_ids - set(normalized))
+    extra = sorted(set(normalized) - listing_ids)
+    if missing or extra:
+        details = []
+        if missing:
+            details.append(f"missing={len(missing)}")
+        if extra:
+            details.append(f"extra={len(extra)}")
+        raise ValueError(
+            "duplicate_group_by_listing must align exactly with requested listings ("
+            + ", ".join(details)
+            + ")"
+        )
+    return normalized
+
+
 def build_listing_predictions(
     candidate_predictions: pd.DataFrame,
     gold_pairs: pd.DataFrame,
     all_listing_ids: Iterable[str],
     policy: Mapping[str, Any],
+    *,
+    duplicate_group_by_listing: Mapping[str, str],
 ) -> pd.DataFrame:
     """Build the single authoritative decision row for every listing."""
     frame = candidate_predictions.copy()
@@ -204,10 +251,15 @@ def build_listing_predictions(
     frame["probability"] = pd.to_numeric(frame["probability"], errors="raise")
     top = select_top_candidates(frame)
     listing_ids = {str(value) for value in all_listing_ids}
+    group_by_listing = _validated_duplicate_group_mapping(
+        listing_ids,
+        duplicate_group_by_listing,
+    )
     missing = listing_ids - set(top["google_id"])
     if missing:
         raise ValueError(f"No retrieved candidates for {len(missing)} listing(s)")
     top = top.loc[top["google_id"].isin(listing_ids)].copy()
+    top["duplicate_group_id"] = top["google_id"].map(group_by_listing)
 
     ranked = frame.sort_values(
         ["google_id", "probability", "amazon_id"],
@@ -275,19 +327,93 @@ def build_listing_predictions(
     return top.sort_values("google_id", kind="mergesort").reset_index(drop=True)
 
 
-def _action_metrics(listings: pd.DataFrame, action: str) -> dict[str, Any]:
+def _listing_duplicate_group_ids(listings: pd.DataFrame) -> np.ndarray:
+    if "duplicate_group_id" not in listings:
+        raise ValueError(
+            "Listing predictions must contain duplicate_group_id for group-aware evidence"
+        )
+    values = listings["duplicate_group_id"]
+    if values.isna().any() or values.astype(str).str.strip().eq("").any():
+        raise ValueError("Listing predictions contain missing duplicate_group_id values")
+    return values.astype(str).str.strip().to_numpy()
+
+
+def _action_metrics(
+    listings: pd.DataFrame,
+    action: str,
+    correct_labels: np.ndarray,
+    duplicate_group_ids: np.ndarray,
+) -> dict[str, Any]:
     selected = listings["action"].eq(action)
     support = int(selected.sum())
-    correct = int(listings.loc[selected, "action_correct"].fillna(False).sum())
+    selected_array = selected.to_numpy(dtype=bool)
+    correct = int((selected_array & correct_labels).sum())
     low, high = wilson_interval(correct, support)
-    return {
+    listing_operation = {
         "support": support,
         "correct_count": correct,
         "error_count": support - correct,
         "empirical_precision": _rate(correct, support) if support else None,
+        "precision_wilson_95_low": low,
+        "precision_wilson_95_high": high,
+        "coverage": _rate(support, len(listings)),
+    }
+    group_evidence = group_action_statistics(
+        selected_array,
+        correct_labels.astype(int),
+        duplicate_group_ids,
+    )
+    return {
+        "support": listing_operation["support"],
+        "correct_count": listing_operation["correct_count"],
+        "error_count": listing_operation["error_count"],
+        "empirical_precision": listing_operation["empirical_precision"],
         "wilson_95_low": low,
         "wilson_95_high": high,
-        "listing_coverage": _rate(support, len(listings)),
+        "listing_coverage": listing_operation["coverage"],
+        "group_evidence": group_evidence,
+        "listing_operation": listing_operation,
+    }
+
+
+def _manual_review_metrics(
+    listings: pd.DataFrame,
+    duplicate_group_ids: np.ndarray,
+) -> dict[str, Any]:
+    """Report review support while leaving action correctness undefined."""
+    selected = listings["action"].eq(MANUAL_REVIEW).to_numpy(dtype=bool)
+    support = int(selected.sum())
+    group_evidence = group_action_statistics(
+        selected,
+        np.ones(len(listings), dtype=int),
+        duplicate_group_ids,
+    )
+    undefined_fields = {
+        "correct_count": None,
+        "error_count": None,
+        "empirical_precision": None,
+        "precision_wilson_95_low": None,
+        "precision_wilson_95_high": None,
+    }
+    group_evidence = {**group_evidence, **undefined_fields}
+    listing_operation = {
+        "support": support,
+        **undefined_fields,
+        "coverage": _rate(support, len(listings)),
+    }
+    return {
+        "support": support,
+        "correct_count": None,
+        "error_count": None,
+        "empirical_precision": None,
+        "wilson_95_low": None,
+        "wilson_95_high": None,
+        "listing_coverage": listing_operation["coverage"],
+        "group_evidence": group_evidence,
+        "listing_operation": listing_operation,
+        "correctness_definition": (
+            "Undefined: manual review is an abstention, not an automatic decision."
+        ),
     }
 
 
@@ -299,6 +425,9 @@ def compute_listing_metrics(listing_predictions: pd.DataFrame) -> dict[str, Any]
         raise ValueError(f"Unknown policy actions: {sorted(unknown)}")
     reviewed = listing_predictions["action"].eq(MANUAL_REVIEW)
     matched = listing_predictions["has_gold_listing"].astype(bool)
+    duplicate_group_ids = _listing_duplicate_group_ids(listing_predictions)
+    match_correct = listing_predictions["is_gold_pair"].astype(bool).to_numpy()
+    no_match_correct = (~matched).to_numpy()
     automatic = ~reviewed
     correct_automatic = listing_predictions.loc[automatic, "action_correct"].fillna(False)
     matched_count = int(matched.sum())
@@ -310,8 +439,23 @@ def compute_listing_metrics(listing_predictions: pd.DataFrame) -> dict[str, Any]
     )
     return {
         "listing_count": len(listing_predictions),
-        "auto_match": _action_metrics(listing_predictions, AUTO_MATCH),
-        "auto_no_match": _action_metrics(listing_predictions, AUTO_NO_MATCH),
+        "duplicate_group_count": int(len(set(duplicate_group_ids))),
+        "auto_match": _action_metrics(
+            listing_predictions,
+            AUTO_MATCH,
+            match_correct,
+            duplicate_group_ids,
+        ),
+        "auto_no_match": _action_metrics(
+            listing_predictions,
+            AUTO_NO_MATCH,
+            no_match_correct,
+            duplicate_group_ids,
+        ),
+        "manual_review": _manual_review_metrics(
+            listing_predictions,
+            duplicate_group_ids,
+        ),
         "manual_review_count": int(reviewed.sum()),
         "manual_review_rate": _rate(int(reviewed.sum()), len(listing_predictions)),
         "automatic_coverage": _rate(int(automatic.sum()), len(listing_predictions)),
@@ -607,6 +751,7 @@ def save_stage_reports(
     retrieval_metrics: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Write the validation-only development report bundle."""
+    _listing_duplicate_group_ids(listing_predictions)
     output = Path(reports_dir)
     output.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -654,6 +799,7 @@ def save_corrected_resplit_reports(
             f"Corrected-resplit output already exists: {output}. "
             "Choose a separate --output-dir for a deliberate rerun."
         )
+    _listing_duplicate_group_ids(listing_predictions)
     output.mkdir(parents=True, exist_ok=False)
     paths = {
         "metrics": output / "metrics.json",

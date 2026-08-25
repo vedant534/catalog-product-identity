@@ -33,6 +33,14 @@ PRODUCT_COLUMNS = [
     "source",
 ]
 SPLIT_NAMES = ("train", "validation", "test")
+SPLIT_ASSIGNMENT_COLUMNS = (
+    "google_id",
+    "component_id",
+    "split",
+    "duplicate_group_id",
+    "duplicate_group_size",
+    "ambiguous_label",
+)
 DUPLICATE_TEXT_COLUMNS = ("title", "manufacturer", "description")
 MISSING_PRICE_SIGNATURE = "<missing-price>"
 
@@ -414,15 +422,141 @@ def make_entity_splits(
     ]
     return pd.DataFrame(
         rows,
-        columns=[
-            "google_id",
-            "component_id",
-            "split",
-            "duplicate_group_id",
-            "duplicate_group_size",
-            "ambiguous_label",
-        ],
+        columns=list(SPLIT_ASSIGNMENT_COLUMNS),
     )
+
+
+def _canonical_ambiguous_labels(values: pd.Series) -> pd.Series:
+    normalized: list[bool] = []
+    for value in values:
+        if value is None or pd.isna(value):
+            raise ValueError("Split assignment ambiguous_label values must be non-null")
+        if isinstance(value, (bool, np.bool_)):
+            normalized.append(bool(value))
+            continue
+        if isinstance(value, (int, float, np.integer, np.floating)) and float(
+            value
+        ) in {0.0, 1.0}:
+            normalized.append(bool(value))
+            continue
+        text = str(value).strip().lower()
+        if text in {"true", "1"}:
+            normalized.append(True)
+        elif text in {"false", "0"}:
+            normalized.append(False)
+        else:
+            raise ValueError(
+                "Split assignment ambiguous_label values must be boolean"
+            )
+    return pd.Series(normalized, index=values.index, dtype=bool)
+
+
+def canonicalize_split_assignments(assignments: pd.DataFrame) -> pd.DataFrame:
+    """Normalize a split-assignment table into one deterministic representation."""
+    missing = set(SPLIT_ASSIGNMENT_COLUMNS) - set(assignments.columns)
+    if missing:
+        raise ValueError(
+            "Split assignments are missing required columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    canonical = assignments.loc[:, list(SPLIT_ASSIGNMENT_COLUMNS)].copy()
+    for column in ("google_id", "component_id", "split", "duplicate_group_id"):
+        if canonical[column].isna().any():
+            raise ValueError(f"Split assignment {column} values must be non-null")
+        canonical[column] = _clean_ids(canonical[column])
+        if canonical[column].eq("").any():
+            raise ValueError(f"Split assignment {column} values must be non-blank")
+    canonical["split"] = canonical["split"].str.lower()
+    unknown_splits = sorted(set(canonical["split"]) - set(SPLIT_NAMES))
+    if unknown_splits:
+        raise ValueError(
+            "Split assignments contain unknown split labels: "
+            + ", ".join(unknown_splits)
+        )
+
+    sizes = pd.to_numeric(canonical["duplicate_group_size"], errors="coerce")
+    if sizes.isna().any() or (sizes < 1).any() or (sizes % 1 != 0).any():
+        raise ValueError("Split assignment duplicate_group_size must be positive integers")
+    canonical["duplicate_group_size"] = sizes.astype("int64")
+    canonical["ambiguous_label"] = _canonical_ambiguous_labels(
+        canonical["ambiguous_label"]
+    )
+    return canonical.sort_values("google_id", kind="mergesort").reset_index(drop=True)
+
+
+def _canonical_split_assignment_bytes(assignments: pd.DataFrame) -> bytes:
+    canonical = canonicalize_split_assignments(assignments)
+    return canonical.to_csv(index=False, lineterminator="\n").encode("utf-8")
+
+
+def split_assignment_sha256(assignments: pd.DataFrame) -> str:
+    """Hash canonical split-assignment rows independent of input row order."""
+    return hashlib.sha256(_canonical_split_assignment_bytes(assignments)).hexdigest()
+
+
+def split_assignment_metadata(assignments: pd.DataFrame) -> dict[str, object]:
+    """Return compact frozen metadata for one canonical assignment table."""
+    canonical = canonicalize_split_assignments(assignments)
+    counts = canonical["split"].value_counts()
+    payload = canonical.to_csv(index=False, lineterminator="\n").encode("utf-8")
+    return {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "row_count": int(len(canonical)),
+        "rows_by_split": {
+            split_name: int(counts.get(split_name, 0)) for split_name in SPLIT_NAMES
+        },
+    }
+
+
+def validate_split_assignments(
+    google: pd.DataFrame,
+    assignments: pd.DataFrame,
+) -> pd.DataFrame:
+    """Validate complete membership and group isolation, returning canonical rows."""
+    canonical = canonicalize_split_assignments(assignments)
+    if "product_id" not in google:
+        raise ValueError("Google records must contain product_id")
+    if google["product_id"].isna().any():
+        raise ValueError("Normalized Google product IDs must be non-null")
+    google_ids = _clean_ids(google["product_id"])
+    if google_ids.eq("").any():
+        raise ValueError("Normalized Google product IDs must be non-blank")
+    if google_ids.duplicated().any():
+        raise ValueError("Normalized Google product IDs must be unique")
+    if canonical["google_id"].duplicated().any():
+        raise ValueError("Split assignment IDs must be unique")
+
+    google_id_set = set(google_ids)
+    assignment_id_set = set(canonical["google_id"])
+    missing = google_id_set - assignment_id_set
+    extra = assignment_id_set - google_id_set
+    if missing or extra:
+        raise ValueError(
+            "Split assignment IDs must exactly equal normalized Google IDs "
+            f"(missing={len(missing)}, extra={len(extra)})"
+        )
+
+    component_splits = canonical.groupby("component_id")["split"].nunique()
+    if component_splits.gt(1).any():
+        raise ValueError("Connected components must not cross split assignments")
+    duplicate_splits = canonical.groupby("duplicate_group_id")["split"].nunique()
+    if duplicate_splits.gt(1).any():
+        raise ValueError("Exact duplicate groups must not cross split assignments")
+    return canonical
+
+
+def validate_exact_split_assignments(
+    expected: pd.DataFrame,
+    actual: pd.DataFrame,
+) -> None:
+    """Require exact equality after canonical normalization and row ordering."""
+    expected_canonical = canonicalize_split_assignments(expected)
+    actual_canonical = canonicalize_split_assignments(actual)
+    if not expected_canonical.equals(actual_canonical):
+        raise ValueError(
+            "Split assignments differ from the frozen canonical membership"
+        )
 
 
 def validate_assignment_ids(

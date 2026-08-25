@@ -17,10 +17,14 @@ import yaml
 from scipy import sparse
 
 from src.data import (
+    canonicalize_split_assignments,
     load_dataset,
     make_entity_splits,
     official_raw_csv_sha256,
+    split_assignment_metadata,
     validate_assignment_ids,
+    validate_exact_split_assignments,
+    validate_split_assignments,
 )
 from src.evaluate import (
     build_listing_predictions,
@@ -122,48 +126,37 @@ def _development_assignments(
     seed: int,
     ratios: tuple[float, float, float],
 ) -> pd.DataFrame:
-    """Reuse the existing corrected-resplit assignments when available."""
+    """Regenerate and validate the seed-defined corrected-resplit assignments."""
+    regenerated = validate_split_assignments(
+        google,
+        make_entity_splits(google, gold, seed=seed, ratios=ratios),
+    )
     path = artifacts_dir / "split_assignments.csv"
     if path.exists():
-        assignments = pd.read_csv(
+        existing = pd.read_csv(
             path,
             dtype={"google_id": str, "component_id": str, "duplicate_group_id": str},
         )
-        required = {
-            "google_id",
-            "component_id",
-            "split",
-            "duplicate_group_id",
-            "duplicate_group_size",
-            "ambiguous_label",
-        }
-        missing = required - set(assignments.columns)
-        if missing:
-            raise ValueError(
-                "Existing split assignments are missing columns: "
-                + ", ".join(sorted(missing))
-            )
-        unknown_splits = set(assignments["split"].dropna().astype(str)) - {
-            "train",
-            "validation",
-            CORRECTED_ASSIGNMENT_SPLIT,
-        }
-        if unknown_splits:
-            raise ValueError(
-                "Existing split assignments contain unknown split labels: "
-                + ", ".join(sorted(unknown_splits))
-            )
-        validate_assignment_ids(google, assignments)
-        return assignments
-
-    assignments = make_entity_splits(google, gold, seed=seed, ratios=ratios)
-    validate_assignment_ids(google, assignments)
-    return assignments
+        existing = validate_split_assignments(google, existing)
+        validate_exact_split_assignments(regenerated, existing)
+    return regenerated
 
 
 def gold_for_listing_ids(gold: pd.DataFrame, listing_ids: Iterable[str]) -> pd.DataFrame:
     selected = {str(value) for value in listing_ids}
     return gold.loc[gold["google_id"].astype(str).isin(selected)].reset_index(drop=True)
+
+
+def _duplicate_groups_for_listing_ids(
+    assignments: pd.DataFrame,
+    listing_ids: Iterable[str],
+) -> dict[str, str]:
+    selected_ids = {str(value) for value in listing_ids}
+    selected = assignments.loc[
+        assignments["google_id"].astype(str).isin(selected_ids),
+        ["google_id", "duplicate_group_id"],
+    ].copy()
+    return dict(selected.astype(str).itertuples(index=False, name=None))
 
 
 def label_candidates(candidates: pd.DataFrame, gold: pd.DataFrame) -> np.ndarray:
@@ -302,6 +295,7 @@ def _require_nonempty_files(paths: Mapping[str, Path], label: str) -> None:
 def _frozen_inputs(
     config: Mapping[str, Any],
     raw_csv_sha256: Mapping[str, str],
+    assignments: pd.DataFrame,
     amazon: pd.DataFrame,
     catalog_tfidf: sparse.spmatrix,
     catalog_embeddings: np.ndarray,
@@ -312,6 +306,7 @@ def _frozen_inputs(
             "model_name": str(config["sentence_model"]),
             "revision": str(config["sentence_model_revision"]),
         },
+        "split_assignments": split_assignment_metadata(assignments),
         "catalog": {
             "row_count": int(len(amazon)),
             "tfidf_shape": [int(value) for value in catalog_tfidf.shape],
@@ -332,18 +327,24 @@ def _save_frozen_artifacts(
     matcher_bundle: Mapping[str, Any],
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    canonical_assignments = canonicalize_split_assignments(assignments)
     joblib.dump(vectorizer, output_dir / "tfidf_vectorizer.joblib")
     amazon.to_csv(output_dir / "amazon_catalog.csv", index=False)
     sparse.save_npz(output_dir / "catalog_tfidf.npz", catalog_tfidf)
     np.save(output_dir / "catalog_dense.npy", catalog_embeddings)
     joblib.dump(dict(matcher_bundle), output_dir / "matcher.joblib")
-    assignments.to_csv(output_dir / "split_assignments.csv", index=False)
+    canonical_assignments.to_csv(
+        output_dir / "split_assignments.csv",
+        index=False,
+        lineterminator="\n",
+    )
     snapshot = {
         "stage": DEVELOP_STAGE,
         "evaluation_protocol": CORRECTED_RESPLIT_PROTOCOL,
         "corrected_resplit_status_at_development": "not_run",
         "config": dict(config),
         "frozen_inputs": dict(frozen_inputs),
+        "split_assignments": dict(frozen_inputs["split_assignments"]),
         "selected_model": matcher_bundle["selected_model"],
         "feature_columns": list(matcher_bundle["feature_columns"]),
         "policy": matcher_bundle["policy"],
@@ -374,7 +375,52 @@ def _load_frozen_artifacts(
     )
 
 
+def _validated_split_assignment_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Frozen snapshot is missing split-assignment metadata.")
+    sha256 = str(value.get("sha256", "")).lower()
+    if len(sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in sha256
+    ):
+        raise ValueError("Frozen split-assignment SHA-256 metadata is invalid.")
+
+    row_count_value = value.get("row_count")
+    if isinstance(row_count_value, (bool, np.bool_)):
+        raise ValueError("Frozen split-assignment row count is invalid.")
+    try:
+        row_count = int(row_count_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Frozen split-assignment row count is invalid.") from error
+    if row_count < 0 or row_count != row_count_value:
+        raise ValueError("Frozen split-assignment row count is invalid.")
+
+    raw_counts = value.get("rows_by_split")
+    expected_splits = {"train", "validation", CORRECTED_ASSIGNMENT_SPLIT}
+    if not isinstance(raw_counts, Mapping) or set(raw_counts) != expected_splits:
+        raise ValueError("Frozen split-assignment split counts are invalid.")
+    rows_by_split: dict[str, int] = {}
+    for split_name in ("train", "validation", CORRECTED_ASSIGNMENT_SPLIT):
+        count_value = raw_counts[split_name]
+        if isinstance(count_value, (bool, np.bool_)):
+            raise ValueError("Frozen split-assignment split counts are invalid.")
+        try:
+            count = int(count_value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Frozen split-assignment split counts are invalid.") from error
+        if count < 0 or count != count_value:
+            raise ValueError("Frozen split-assignment split counts are invalid.")
+        rows_by_split[split_name] = count
+    if sum(rows_by_split.values()) != row_count:
+        raise ValueError("Frozen split-assignment counts do not sum to its row count.")
+    return {
+        "sha256": sha256,
+        "row_count": row_count,
+        "rows_by_split": rows_by_split,
+    }
+
+
 def _validate_corrected_snapshot(
+    current_config: Mapping[str, Any],
     snapshot: Mapping[str, Any],
     matcher: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -387,6 +433,78 @@ def _validate_corrected_snapshot(
     if not isinstance(config, dict) or not isinstance(frozen_inputs, dict):
         raise ValueError("Frozen snapshot is missing configuration or input metadata.")
 
+    for name, converter in (
+        ("split_seed", int),
+        ("model_seed", int),
+        ("top_k", int),
+        ("rrf_constant", float),
+    ):
+        try:
+            current_value = converter(current_config[name])
+            snapshot_value = converter(config[name])
+            matcher_value = converter(matcher[name])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"Frozen {name} metadata is missing or invalid.") from error
+        if current_value != snapshot_value:
+            raise ValueError(f"Current and frozen configurations disagree on {name}.")
+        if matcher_value != snapshot_value:
+            raise ValueError(f"Frozen matcher and snapshot disagree on {name}.")
+
+    try:
+        current_ratios = tuple(float(value) for value in current_config["split_ratios"])
+        snapshot_ratios = tuple(float(value) for value in config["split_ratios"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Frozen split-ratio metadata is missing or invalid.") from error
+    if current_ratios != snapshot_ratios:
+        raise ValueError("Current and frozen configurations disagree on split_ratios.")
+
+    snapshot_features = snapshot.get("feature_columns")
+    matcher_features = matcher.get("feature_columns")
+    if (
+        not isinstance(snapshot_features, (list, tuple))
+        or not isinstance(matcher_features, (list, tuple))
+        or list(snapshot_features) != list(matcher_features)
+    ):
+        raise ValueError(
+            "Frozen matcher and snapshot disagree on feature column order."
+        )
+    if "feature_columns" in current_config:
+        current_features = current_config["feature_columns"]
+        if not isinstance(current_features, (list, tuple)) or list(
+            current_features
+        ) != list(snapshot_features):
+            raise ValueError(
+                "Current configuration and frozen snapshot disagree on feature "
+                "column order."
+            )
+
+    snapshot_selected_model = snapshot.get("selected_model")
+    matcher_selected_model = matcher.get("selected_model")
+    if (
+        not isinstance(snapshot_selected_model, str)
+        or not snapshot_selected_model
+        or matcher_selected_model != snapshot_selected_model
+    ):
+        raise ValueError("Frozen matcher and snapshot disagree on the selected model.")
+    if (
+        "selected_model" in current_config
+        and current_config["selected_model"] != snapshot_selected_model
+    ):
+        raise ValueError(
+            "Current configuration and frozen snapshot disagree on the selected model."
+        )
+
+    snapshot_assignment_metadata = _validated_split_assignment_metadata(
+        snapshot.get("split_assignments")
+    )
+    frozen_assignment_metadata = _validated_split_assignment_metadata(
+        frozen_inputs.get("split_assignments")
+    )
+    if snapshot_assignment_metadata != frozen_assignment_metadata:
+        raise ValueError(
+            "Frozen snapshot split-assignment metadata is internally inconsistent."
+        )
+
     encoder = frozen_inputs.get("sentence_encoder")
     if not isinstance(encoder, dict):
         raise ValueError("Frozen snapshot is missing sentence encoder metadata.")
@@ -397,15 +515,61 @@ def _validate_corrected_snapshot(
     if encoder.get("model_name") != expected_name or encoder.get("revision") != expected_revision:
         raise ValueError("Frozen sentence encoder metadata does not match configuration.")
     if (
+        str(current_config.get("sentence_model", "")) != expected_name
+        or str(current_config.get("sentence_model_revision", ""))
+        != expected_revision
+    ):
+        raise ValueError(
+            "Current and frozen configurations disagree on sentence encoder metadata."
+        )
+    if (
         matcher.get("sentence_model_name") != expected_name
         or matcher.get("sentence_model_revision") != expected_revision
     ):
         raise ValueError("Frozen matcher uses incompatible sentence encoder metadata.")
-    if matcher.get("selected_model") != snapshot.get("selected_model"):
-        raise ValueError("Frozen matcher and snapshot disagree on the selected model.")
     if matcher.get("policy") != snapshot.get("policy"):
         raise ValueError("Frozen matcher and snapshot disagree on the policy.")
+    if snapshot.get("corrected_resplit_status_at_development") != "not_run":
+        raise ValueError(
+            "Frozen development snapshot is not awaiting corrected evaluation."
+        )
     return config, frozen_inputs
+
+
+def _validate_frozen_split_assignments(
+    frozen_inputs: Mapping[str, Any],
+    assignments: pd.DataFrame,
+    google: pd.DataFrame,
+    gold: pd.DataFrame,
+    config: Mapping[str, Any],
+) -> pd.DataFrame:
+    """Validate artifact metadata, invariants, and deterministic membership."""
+    expected_metadata = _validated_split_assignment_metadata(
+        frozen_inputs.get("split_assignments")
+    )
+    canonical_artifact = validate_split_assignments(google, assignments)
+    actual_metadata = split_assignment_metadata(canonical_artifact)
+    if actual_metadata != expected_metadata:
+        raise ValueError(
+            "Frozen split-assignment artifact does not match snapshot metadata."
+        )
+
+    try:
+        split_seed = int(config["split_seed"])
+        split_ratios = tuple(float(value) for value in config["split_ratios"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Frozen split configuration is missing or invalid.") from error
+    regenerated = validate_split_assignments(
+        google,
+        make_entity_splits(
+            google,
+            gold,
+            seed=split_seed,
+            ratios=split_ratios,
+        ),
+    )
+    validate_exact_split_assignments(regenerated, canonical_artifact)
+    return canonical_artifact
 
 
 def _validate_frozen_catalog(
@@ -483,12 +647,17 @@ def _stage_evaluation(
     policy: Mapping[str, Any],
     config: Mapping[str, Any],
     latency_seconds: float | np.ndarray,
+    duplicate_group_by_listing: Mapping[str, str],
 ) -> tuple[dict[str, Any], pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
     listing_ids = listings["product_id"].astype(str).tolist()
     pair_labels = label_candidates(candidates, gold)
     predictions = prediction_frame(candidates, features, probabilities)
     listing_predictions = build_listing_predictions(
-        predictions, gold, listing_ids, policy
+        predictions,
+        gold,
+        listing_ids,
+        policy,
+        duplicate_group_by_listing=duplicate_group_by_listing,
     )
     ranking = compute_ranking_metrics(predictions, gold, listing_ids)
     retrieval = compute_retrieval_metrics(
@@ -551,7 +720,7 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
     reports_dir = Path(str(config["reports_dir"]))
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading benchmark and the existing duplicate-aware assignments...")
+    print("Loading benchmark and regenerating duplicate-aware assignments...")
     amazon, google, gold = load_dataset(
         raw_dir, download_if_missing=True, url=str(config["dataset_url"])
     )
@@ -720,6 +889,7 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
     frozen_inputs = _frozen_inputs(
         config,
         raw_csv_sha256,
+        assignments,
         amazon,
         catalog_tfidf,
         catalog_embeddings,
@@ -738,12 +908,17 @@ def run_develop(config_path: str | Path) -> dict[str, Any]:
         policy=policy,
         config=config,
         latency_seconds=validation_latency,
+        duplicate_group_by_listing=_duplicate_groups_for_listing_ids(
+            assignments,
+            validation["product_id"].astype(str),
+        ),
     )
     injected = train_candidates["gold_injected"].fillna(False).astype(bool)
     metrics = {
         "stage": DEVELOP_STAGE,
         "evaluation_protocol": CORRECTED_RESPLIT_PROTOCOL,
         "frozen_inputs": frozen_inputs,
+        "split_assignments": frozen_inputs["split_assignments"],
         "corrected_resplit": {
             "status": "not_run",
             "reserved_listings_encoded": False,
@@ -853,7 +1028,11 @@ def run_corrected_eval(
         catalog_embeddings,
         matcher,
     ) = _load_frozen_artifacts(artifacts_dir)
-    config, frozen_inputs = _validate_corrected_snapshot(snapshot, matcher)
+    config, frozen_inputs = _validate_corrected_snapshot(
+        locator_config,
+        snapshot,
+        matcher,
+    )
 
     reports_dir = Path(str(config["reports_dir"]))
     development_reports = _development_report_paths(reports_dir)
@@ -869,6 +1048,12 @@ def run_corrected_eval(
         raise ValueError("Development metrics use an incompatible evaluation protocol.")
     if development_metrics.get("frozen_inputs") != frozen_inputs:
         raise ValueError("Development metrics and frozen snapshot disagree on inputs.")
+    if _validated_split_assignment_metadata(
+        development_metrics.get("split_assignments")
+    ) != _validated_split_assignment_metadata(frozen_inputs.get("split_assignments")):
+        raise ValueError(
+            "Development metrics and frozen snapshot disagree on split assignments."
+        )
 
     corrected_output = (
         Path(output_dir)
@@ -900,7 +1085,13 @@ def run_corrected_eval(
     )
     if len(source_amazon) != len(amazon):
         raise ValueError("Normalized raw catalog row count differs from frozen catalog.")
-    validate_assignment_ids(google, assignments)
+    assignments = _validate_frozen_split_assignments(
+        frozen_inputs,
+        assignments,
+        google,
+        gold,
+        config,
+    )
     evaluation = listings_for_split(google, assignments, CORRECTED_ASSIGNMENT_SPLIT)
     evaluation_gold = gold_for_listing_ids(
         gold, evaluation["product_id"].astype(str)
@@ -945,12 +1136,17 @@ def run_corrected_eval(
         policy=matcher["policy"],
         config=config,
         latency_seconds=latency,
+        duplicate_group_by_listing=_duplicate_groups_for_listing_ids(
+            assignments,
+            evaluation["product_id"].astype(str),
+        ),
     )
     corrected_metrics = {
         "stage": CORRECTED_EVAL_STAGE,
         "evaluation_protocol": CORRECTED_RESPLIT_PROTOCOL,
         "evidence_role": "transparent_secondary_confirmation",
         "frozen_inputs": frozen_inputs,
+        "split_assignments": frozen_inputs["split_assignments"],
         "run": {
             "split_seed": int(config["split_seed"]),
             "model_seed": int(config["model_seed"]),

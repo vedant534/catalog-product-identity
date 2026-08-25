@@ -45,6 +45,12 @@ no duplicate group crosses a split. One unmapped member of a mixed
 mapped/unmapped duplicate group is flagged as ambiguous and excluded as a
 definite training negative.
 
+Development deterministically regenerates this membership from the raw inputs,
+ratios, and split seed, then requires exact canonical equality with any existing
+assignment artifact. The canonical 3,226-row assignment has SHA-256
+`4bc0394c757ba60ca728f9fd78de9844cbae6a2172397f6d09a0b12cd2fa13e1` and
+split counts `2258 / 484 / 484`.
+
 The official benchmark mapping is the primary label view. Under its closed-world
 assumption, a Google listing absent from the mapping is treated as no-match.
 That assumption is imperfect: an unmapped listing can still collide with an
@@ -181,6 +187,13 @@ Listing-level operational results after applying the group-selected threshold:
 |---|---:|---:|---:|---:|---:|---:|
 | `auto_match` | 0 | 0 | 0 | — | — | 0.0000 |
 | `auto_no_match` | 210 | 202 | 8 | 0.9619 | [0.9266, 0.9806] | 0.4339 |
+| `manual_review` | 274 | — | — | — | — | 0.5661 |
+
+The machine-readable listing-policy report exposes the same fields at both
+group and listing level for all three actions. Manual review covers 271 of 472
+validation groups and 274 of 484 listings; its correctness, precision, and
+Wilson interval are `null` because review is an abstention rather than an
+automatic decision.
 
 `both_constraints_met` is false because no auto-match threshold met both the
 precision and support requirements. The policy therefore enables only
@@ -198,7 +211,8 @@ The compact threshold diagnostic is
 - [`reports/model_comparison.csv`](reports/model_comparison.csv): the four
   validation model variants and selection result.
 - [`reports/validation_listing_predictions.csv`](reports/validation_listing_predictions.csv):
-  one authoritative top-candidate/action row per validation listing.
+  one authoritative top-candidate/action row per validation listing, including
+  its exact `duplicate_group_id`.
 - [`reports/validation_error_examples.csv`](reports/validation_error_examples.csv):
   listing-policy error categories kept separate from pair-score diagnostics.
 - [`reports/validation_precision_coverage.csv`](reports/validation_precision_coverage.csv):
@@ -215,6 +229,7 @@ The frozen input metadata records these exact development inputs:
 | Input | SHA-256 or revision |
 |---|---|
 | MiniLM encoder | `1110a243fdf4706b3f48f1d95db1a4f5529b4d41` |
+| Canonical `split_assignments.csv` | `4bc0394c757ba60ca728f9fd78de9844cbae6a2172397f6d09a0b12cd2fa13e1` |
 | `Amazon.csv` | `cabc0379070c595eca65c4a69c77b3267b97f8a81b303e77115b52e6e534e65f` |
 | `GoogleProducts.csv` | `18fbec453670e40e0969fdaffe71e92ba62a24c49b0c8341fe4621e70e402e3f` |
 | `Amzon_GoogleProducts_perfectMapping.csv` | `885eda7da34ed00809975d34452800e7fbde9ef0540fb60474a18dca15fa4fe7` |
@@ -229,8 +244,11 @@ The future corrected evaluation is additive and writes only to its own bundle:
 It does not rewrite development metrics, model comparison, threshold evidence,
 validation predictions, validation errors, or validation plots. Before writing,
 the stage checks the frozen artifacts, raw inputs, assignments, and development
-reports. It refuses to overwrite an existing corrected-resplit bundle. A
-deliberate rerun must use a different output directory.
+reports. Assignment checks cover the canonical digest and counts, exact
+seed-defined membership, Google-ID equality, allowed labels, and component and
+exact-duplicate-group isolation. It refuses to overwrite an existing
+corrected-resplit bundle. A deliberate rerun must use a different output
+directory.
 
 ## Install and run
 
